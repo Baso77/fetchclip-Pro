@@ -3,86 +3,49 @@ const { promisify } = require('util');
 const path = require('path');
 const fs = require('fs');
 const NodeCache = require('node-cache');
-const YtDlpWrap = require('yt-dlp-wrap');
 const { logger } = require('../utils/logger');
 const { detectPlatform } = require('../utils/urlUtils');
 
 const execFileAsync = promisify(execFile);
-let cachedYtdlpPath = null;
-
-async function resolveYtDlpPath() {
-  if (cachedYtdlpPath) {
-    return cachedYtdlpPath;
-  }
-
-  if (process.env.YTDLP_PATH && fs.existsSync(process.env.YTDLP_PATH)) {
-    cachedYtdlpPath = process.env.YTDLP_PATH;
-    return cachedYtdlpPath;
-  }
-
-  const candidates = [
-    path.join(process.cwd(), 'node_modules', '.bin', 'yt-dlp'),
-    path.join(process.cwd(), 'node_modules', '.bin', 'yt-dlp.cmd'),
-    path.join(process.cwd(), 'node_modules', '.bin', 'yt-dlp.exe'),
-    '/usr/local/bin/yt-dlp',
-    '/usr/bin/yt-dlp',
-    'yt-dlp',
-    'yt-dlp.exe',
-  ];
-
-  for (const candidate of candidates) {
-    try {
-      if (fs.existsSync(candidate)) {
-        cachedYtdlpPath = candidate;
-        return cachedYtdlpPath;
-      }
-    } catch {}
-  }
-
-  const fallbackBinary = path.join(process.cwd(), `yt-dlp${process.platform === 'win32' ? '.exe' : ''}`);
-  if (fs.existsSync(fallbackBinary)) {
-    cachedYtdlpPath = fallbackBinary;
-    return cachedYtdlpPath;
-  }
-
-  try {
-    logger.info(`yt-dlp not found locally; downloading binary to ${fallbackBinary}`);
-    await YtDlpWrap.downloadFromGithub(fallbackBinary);
-    cachedYtdlpPath = fallbackBinary;
-    return cachedYtdlpPath;
-  } catch (err) {
-    logger.warn(`Failed to download yt-dlp binary: ${err.message}. Falling back to executable name.`);
-    cachedYtdlpPath = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
-    return cachedYtdlpPath;
-  }
-}
 
 const metaCache = new NodeCache({
   stdTTL: parseInt(process.env.CACHE_TTL) || 300,
   checkperiod: 60,
 });
 
-function normalizeFormats(rawFormats, platform) {
-  if (!Array.isArray(rawFormats)) {
-    return { formats: [], hasAudio: false, hasVideo: false };
+function getYtDlpPath() {
+  if (
+    process.env.YTDLP_PATH &&
+    fs.existsSync(process.env.YTDLP_PATH)
+  ) {
+    return process.env.YTDLP_PATH;
   }
+
+  const candidates = [
+    '/usr/local/bin/yt-dlp',
+    '/usr/bin/yt-dlp',
+    path.join(process.cwd(), 'node_modules', '.bin', 'yt-dlp'),
+    'yt-dlp',
+  ];
+
+  for (const c of candidates) {
+    try {
+      if (c === 'yt-dlp' || fs.existsSync(c)) {
+        return c;
+      }
+    } catch {}
+  }
+
+  return 'yt-dlp';
+}
+
+const YTDLP_PATH = getYtDlpPath();
+
+function normalizeFormats(rawFormats, platform) {
+  if (!Array.isArray(rawFormats)) return [];
 
   const seen = new Set();
   const normalized = [];
-
-  const hasAudio = rawFormats.some(
-    (f) =>
-      ((f.acodec && f.acodec !== 'none') ||
-        (f.acodec === null && /audio/i.test(f.format || f.format_note || '')))
-      && f.url
-  );
-
-  const hasVideo = rawFormats.some(
-    (f) =>
-      ((f.vcodec && f.vcodec !== 'none') ||
-        (f.vcodec === null && /video/i.test(f.format || f.format_note || '')))
-      && f.url
-  );
 
   // VIDEO FORMATS
   const videoFormats = rawFormats.filter(
@@ -157,11 +120,7 @@ function normalizeFormats(rawFormats, platform) {
       });
     });
 
-  return {
-    formats: normalized.slice(0, 20),
-    hasAudio,
-    hasVideo,
-  };
+  return normalized.slice(0, 20);
 }
 
 async function extractMetadata(url) {
@@ -175,12 +134,12 @@ async function extractMetadata(url) {
   logger.info(`Extracting metadata for: ${url}`);
 
   const platform = detectPlatform(url);
-  const YTDLP_PATH = await resolveYtDlpPath();
 
   const args = [
     '--dump-json',
     '--no-playlist',
     '--no-warnings',
+    '--flat-playlist',
     '--no-check-certificate',
     '--user-agent',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -255,7 +214,7 @@ async function extractMetadata(url) {
     throw new Error('PARSE_FAILED');
   }
 
-  const { formats, hasAudio, hasVideo } = normalizeFormats(
+  const formats = normalizeFormats(
     info.formats || [],
     platform
   );
@@ -297,9 +256,13 @@ async function extractMetadata(url) {
 
     formats,
 
-    hasAudio,
+    hasAudio: formats.some(
+      (f) => f.type === 'audio'
+    ),
 
-    hasVideo,
+    hasVideo: formats.some(
+      (f) => f.type === 'video'
+    ),
 
     extractedAt: Date.now(),
   };
@@ -325,8 +288,6 @@ async function getDownloadUrl(url, formatId) {
     formatId || 'best[ext=mp4]/best',
     url,
   ];
-
-  const YTDLP_PATH = await resolveYtDlpPath();
 
   try {
     const { stdout } = await execFileAsync(
