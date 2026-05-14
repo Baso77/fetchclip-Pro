@@ -30,7 +30,6 @@ const allowedOrigins = [
   'http://localhost:3001',
 ].filter(Boolean);
 
-// Log origins at startup so you can verify in Render logs
 logger.info(`CORS allowed origins: ${allowedOrigins.join(', ')}`);
 
 app.use(helmet({
@@ -40,24 +39,59 @@ app.use(helmet({
 
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin || allowedOrigins.some(o => origin.startsWith(o))) {
+    // Allow requests with no origin
+    // (mobile apps, curl, Postman, server-side requests)
+    if (!origin) {
       return callback(null, true);
     }
-    logger.warn(`CORS rejected origin: ${origin}`);
-    callback(new Error('Not allowed by CORS'));
+
+    // Exact match OR allow all Vercel preview domains
+    const isAllowed =
+      allowedOrigins.includes(origin) ||
+      origin.endsWith('.vercel.app');
+
+    if (isAllowed) {
+      return callback(null, true);
+    }
+
+    logger.warn(`CORS blocked origin: ${origin}`);
+    return callback(new Error(`CORS blocked for origin: ${origin}`));
   },
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Admin-Key'],
+
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'X-Admin-Key',
+  ],
+
   credentials: true,
-  maxAge: 86400,
+
+  optionsSuccessStatus: 200,
 }));
 
+// Explicit OPTIONS handling
 app.options('*', cors());
-app.use(compression());
-app.use(express.json({ limit: '10kb' }));
-app.use(express.urlencoded({ extended: false, limit: '10kb' }));
-app.use(morgan('combined', { stream: { write: msg => logger.http(msg.trim()) } }));
 
+app.use(compression());
+
+app.use(express.json({
+  limit: '10kb',
+}));
+
+app.use(express.urlencoded({
+  extended: false,
+  limit: '10kb',
+}));
+
+app.use(morgan('combined', {
+  stream: {
+    write: msg => logger.http(msg.trim()),
+  },
+}));
+
+// Routes
 app.use('/api/fetch', strictRateLimiter, fetchRouter);
 app.use('/api/download', strictRateLimiter, downloadRouter);
 app.use('/api/health', healthRouter);
@@ -66,14 +100,21 @@ app.use('/api/contact', rateLimiter, contactRouter);
 app.use('/api/trending', rateLimiter, trendingRouter);
 app.use('/api/admin', adminRouter);
 
+// 404
 app.use((req, res) => {
-  res.status(404).json({ success: false, error: 'Route not found' });
+  res.status(404).json({
+    success: false,
+    error: 'Route not found',
+  });
 });
 
+// Error handler
 app.use(errorHandler);
 
 const server = app.listen(PORT, () => {
-  logger.info(`FetchClip Pro backend running on port ${PORT} [${process.env.NODE_ENV}]`);
+  logger.info(
+    `FetchClip Pro backend running on port ${PORT} [${process.env.NODE_ENV}]`
+  );
 });
 
 server.timeout = 120000;
@@ -81,6 +122,7 @@ server.keepAliveTimeout = 65000;
 
 process.on('SIGTERM', () => {
   logger.info('SIGTERM received, closing server gracefully');
+
   server.close(() => {
     logger.info('Server closed');
     process.exit(0);
