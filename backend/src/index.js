@@ -30,6 +30,9 @@ const allowedOrigins = [
   'http://localhost:3001',
 ].filter(Boolean);
 
+// Log origins at startup so you can verify in Render logs
+logger.info(`CORS allowed origins: ${allowedOrigins.join(', ')}`);
+
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' },
   contentSecurityPolicy: false,

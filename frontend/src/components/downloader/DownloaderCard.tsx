@@ -13,7 +13,7 @@ import {
   platformColor, type MediaMetadata, type MediaFormat,
 } from '@/lib/api';
 
-type DownloadState = 'idle' | 'fetching' | 'ready' | 'downloading' | 'error';
+type DownloadState = 'idle' | 'fetching' | 'ready' | 'error';
 
 export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: string }) {
   const [url, setUrl] = useState(defaultUrl);
@@ -21,7 +21,8 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
   const [metadata, setMetadata] = useState<MediaMetadata | null>(null);
   const [selectedFormat, setSelectedFormat] = useState<MediaFormat | null>(null);
   const [errorMsg, setErrorMsg] = useState('');
-  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  // Track which button is currently downloading: 'video', 'audio', 'thumbnail', or null
+  const [activeDownload, setActiveDownload] = useState<'video' | 'audio' | 'thumbnail' | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   function reset() {
@@ -29,6 +30,7 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
     setSelectedFormat(null);
     setErrorMsg('');
     setState('idle');
+    setActiveDownload(null);
     setUrl('');
     setTimeout(() => inputRef.current?.focus(), 100);
   }
@@ -41,6 +43,7 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
     setState('fetching');
     setErrorMsg('');
     setMetadata(null);
+    setSelectedFormat(null);
 
     const result = await fetchMediaMetadata(trimmed);
 
@@ -53,9 +56,11 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
     const data = result.data;
     setMetadata(data);
 
-    const defaultFmt = data.formats.find(f => f.type === 'video' && f.height && f.height <= 1080)
-      || data.formats[0]
-      || null;
+    // Pick best default video format (prefer 1080p or lower)
+    const defaultFmt =
+      data.formats.find(f => f.type === 'video' && f.height !== null && f.height <= 1080) ||
+      data.formats.find(f => f.type === 'video') ||
+      null;
     setSelectedFormat(defaultFmt);
     setState('ready');
 
@@ -63,30 +68,35 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
   }
 
   async function handleDownload(type: 'video' | 'audio' | 'thumbnail') {
-    if (!metadata) return;
-    const id = type === 'audio'
-      ? 'audio-best'
-      : `${type}-${selectedFormat?.formatId || 'best'}`;
-    setDownloadingId(id);
+    if (!metadata || activeDownload !== null) return;
 
+    setActiveDownload(type);
+
+    // For video: use selected format ID
+    // For audio: pass undefined so backend uses bestaudio selector
+    // For thumbnail: handled specially in backend
     const formatId = type === 'video' ? (selectedFormat?.formatId || undefined) : undefined;
+
     const result = await requestDownload(metadata.webpage_url, formatId, type);
 
-    setDownloadingId(null);
+    setActiveDownload(null);
 
     if (!result.success || !result.directUrl) {
       toast.error(result.error || 'Download failed. Please try again.');
       return;
     }
 
-    triggerBrowserDownload(result.directUrl, result.filename || `fetchclip-${type}.${result.ext || 'mp4'}`);
-    toast.success(`Starting ${type} download...`);
+    triggerBrowserDownload(
+      result.directUrl,
+      result.filename || `fetchclip-${type}.${result.ext || 'mp4'}`
+    );
+    toast.success(`${type.charAt(0).toUpperCase() + type.slice(1)} download starting...`);
     logEvent('download_success', metadata.platform, { type, quality: selectedFormat?.quality });
   }
 
-  const videoFormats = metadata?.formats.filter(f => f.type === 'video') || [];
-  const audioFormats = metadata?.formats.filter(f => f.type === 'audio') || [];
-  const canDownloadAudio = metadata?.hasAudio || audioFormats.length > 0;
+  const videoFormats = metadata?.formats.filter(f => f.type === 'video') ?? [];
+  // Audio button shows if: there are audio formats OR backend flagged hasAudio
+  const showAudioButton = (metadata?.formats.some(f => f.type === 'audio') ?? false) || (metadata?.hasAudio ?? false);
 
   return (
     <div className="w-full max-w-3xl mx-auto">
@@ -104,9 +114,12 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
             autoFocus
           />
           {metadata && (
-            <button type="button" onClick={reset}
+            <button
+              type="button"
+              onClick={reset}
               className="p-3 rounded-xl text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition-all"
-              aria-label="Clear">
+              aria-label="Clear"
+            >
               <X className="w-5 h-5" />
             </button>
           )}
@@ -154,7 +167,6 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
         <div className="mt-6 glass-card overflow-hidden animate-slide-up shadow-xl shadow-gray-200/50 dark:shadow-gray-900/50">
           {/* Media info header */}
           <div className="p-6 flex flex-col sm:flex-row gap-5">
-            {/* Thumbnail */}
             {metadata.thumbnail && (
               <div className="relative flex-shrink-0 w-full sm:w-48 aspect-video rounded-xl overflow-hidden bg-gray-100 dark:bg-gray-800 group">
                 <Image
@@ -175,7 +187,6 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
               </div>
             )}
 
-            {/* Meta */}
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 mb-2">
                 <span className={`platform-badge ${platformColor(metadata.platform)}`}>
@@ -187,13 +198,19 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
               </h2>
               <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
                 {metadata.uploader && (
-                  <span className="flex items-center gap-1"><User className="w-3 h-3" />{metadata.uploader}</span>
+                  <span className="flex items-center gap-1">
+                    <User className="w-3 h-3" />{metadata.uploader}
+                  </span>
                 )}
                 {metadata.duration && (
-                  <span className="flex items-center gap-1"><Clock className="w-3 h-3" />{formatDuration(metadata.duration)}</span>
+                  <span className="flex items-center gap-1">
+                    <Clock className="w-3 h-3" />{formatDuration(metadata.duration)}
+                  </span>
                 )}
                 {metadata.viewCount && (
-                  <span className="flex items-center gap-1"><Eye className="w-3 h-3" />{metadata.viewCount.toLocaleString()} views</span>
+                  <span className="flex items-center gap-1">
+                    <Eye className="w-3 h-3" />{metadata.viewCount.toLocaleString()} views
+                  </span>
                 )}
               </div>
             </div>
@@ -201,7 +218,7 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
 
           {/* Format selector + Download buttons */}
           <div className="px-6 pb-6 space-y-4 border-t border-gray-100 dark:border-gray-800 pt-5">
-            {/* Quality selector */}
+            {/* Quality selector — only shown when video formats exist */}
             {videoFormats.length > 0 && (
               <div>
                 <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-2 uppercase tracking-wide">
@@ -215,11 +232,14 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
                       setSelectedFormat(fmt || null);
                     }}
                     className="input-field appearance-none pr-10 cursor-pointer text-sm"
+                    disabled={activeDownload !== null}
                   >
                     {videoFormats.map(f => (
                       <option key={f.formatId} value={f.formatId}>
-                        {f.quality} {f.ext ? `· ${f.ext.toUpperCase()}` : ''} {f.filesize ? `· ${formatFileSize(f.filesize)}` : ''}
-                        {f.fps ? ` · ${f.fps}fps` : ''}
+                        {f.quality}
+                        {f.ext ? ` · ${f.ext.toUpperCase()}` : ''}
+                        {f.filesize ? ` · ${formatFileSize(f.filesize)}` : ''}
+                        {f.fps && f.fps > 30 ? ` · ${f.fps}fps` : ''}
                       </option>
                     ))}
                   </select>
@@ -230,14 +250,14 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
 
             {/* Download buttons */}
             <div className="flex flex-wrap gap-3">
-              {/* Video download */}
+              {/* Video download button */}
               {videoFormats.length > 0 && (
                 <button
                   onClick={() => handleDownload('video')}
-                  disabled={downloadingId !== null}
+                  disabled={activeDownload !== null}
                   className="btn-primary flex items-center gap-2 flex-1 sm:flex-none justify-center"
                 >
-                  {downloadingId === `video-${selectedFormat?.formatId || 'best'}` ? (
+                  {activeDownload === 'video' ? (
                     <><Loader2 className="w-4 h-4 animate-spin" /> Preparing...</>
                   ) : (
                     <><Download className="w-4 h-4" /> Download Video</>
@@ -245,14 +265,14 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
                 </button>
               )}
 
-              {/* Audio download */}
-              {canDownloadAudio && (
+              {/* Audio download button — shown whenever showAudioButton is true */}
+              {showAudioButton && (
                 <button
                   onClick={() => handleDownload('audio')}
-                  disabled={downloadingId !== null}
+                  disabled={activeDownload !== null}
                   className="btn-secondary flex items-center gap-2 justify-center"
                 >
-                  {downloadingId === 'audio-best' ? (
+                  {activeDownload === 'audio' ? (
                     <><Loader2 className="w-4 h-4 animate-spin" /> Preparing...</>
                   ) : (
                     <><Music className="w-4 h-4" /> Audio Only</>
@@ -260,14 +280,14 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
                 </button>
               )}
 
-              {/* Thumbnail download */}
+              {/* Thumbnail download button */}
               {metadata.thumbnail && (
                 <button
                   onClick={() => handleDownload('thumbnail')}
-                  disabled={downloadingId !== null}
+                  disabled={activeDownload !== null}
                   className="btn-secondary flex items-center gap-2 justify-center"
                 >
-                  {downloadingId === 'thumbnail-best' ? (
+                  {activeDownload === 'thumbnail' ? (
                     <><Loader2 className="w-4 h-4 animate-spin" /> Preparing...</>
                   ) : (
                     <><ImageIcon className="w-4 h-4" /> Thumbnail</>
