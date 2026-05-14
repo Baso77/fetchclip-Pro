@@ -163,7 +163,7 @@ async function extractMetadata(url) {
     '--no-playlist',
     '--no-warnings',
     '--no-check-certificate',
-    '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     '--add-header', 'Accept-Language:en-US,en;q=0.9',
     '--extractor-args', 'youtube:skip=dash,hls',
     url,
@@ -254,7 +254,7 @@ async function getDownloadUrl(url, formatId) {
     '--no-playlist',
     '--no-warnings',
     '--no-check-certificate',
-    '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     '-f', formatSelector,
     url,
   ];
