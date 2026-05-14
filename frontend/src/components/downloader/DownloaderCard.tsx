@@ -72,6 +72,7 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
 
     setActiveDownload(type);
 
+    try {
     // For video: use selected format ID
     // For audio: pass undefined so backend uses bestaudio selector
     // For thumbnail: handled specially in backend
@@ -79,18 +80,20 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
 
     const result = await requestDownload(metadata.webpage_url, formatId, type);
 
-    setActiveDownload(null);
-
     if (!result.success || !result.directUrl) {
       toast.error(result.error || 'Download failed. Please try again.');
+      setActiveDownload(null);
       return;
     }
 
     triggerBrowserDownload(
       result.directUrl,
-      result.filename || `fetchclip-${type}.${result.ext || 'mp4'}`
+      result.filename || `${metadata.title.slice(0, 30)}-${type}.${result.ext || 'mp4'}`
     );
     toast.success(`${type.charAt(0).toUpperCase() + type.slice(1)} download starting...`);
+    } finally {
+      setActiveDownload(null);
+    }
     logEvent('download_success', metadata.platform, { type, quality: selectedFormat?.quality });
   }
 

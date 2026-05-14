@@ -156,16 +156,14 @@ async function extractMetadata(url) {
   logger.info(`Extracting metadata for: ${url}`);
   const platform = detectPlatform(url);
 
-  // REMOVED --flat-playlist — it strips format data
-  // REMOVED --flat-playlist because it prevents full format extraction
   const args = [
     '--dump-json',
     '--no-playlist',
     '--no-warnings',
     '--no-check-certificate',
+    '--no-cache-dir',
     '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     '--add-header', 'Accept-Language:en-US,en;q=0.9',
-    '--extractor-args', 'youtube:skip=dash,hls',
     url,
   ];
 
@@ -244,10 +242,20 @@ async function extractMetadata(url) {
 }
 
 async function getDownloadUrl(url, formatId) {
+  // Check cache first to avoid running yt-dlp again (Speed fix)
+  const cached = metaCache.get(url);
+  if (cached && formatId && formatId !== 'bestaudio') {
+    const cachedFormat = cached.formats.find(f => f.formatId === formatId);
+    if (cachedFormat && cachedFormat.url) {
+      logger.debug(`Using cached URL for format ${formatId}`);
+      return { directUrl: cachedFormat.url, ext: cachedFormat.ext, title: cached.title };
+    }
+  }
+
   // For audio, use yt-dlp's best audio selector
   const formatSelector = formatId && formatId !== 'bestaudio'
     ? formatId
-    : 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio';
+    : 'bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio';
 
   const args = [
     '--dump-json',
