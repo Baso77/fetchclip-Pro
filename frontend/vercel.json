@@ -4,11 +4,6 @@
   "outputDirectory": ".next",
   "installCommand": "npm ci",
   "devCommand": "npm run dev",
-  "env": {
-    "NEXT_PUBLIC_BACKEND_URL": "@fetchclip-backend-url",
-    "NEXT_PUBLIC_SITE_URL": "@fetchclip-site-url",
-    "ADMIN_SECRET_KEY": "@fetchclip-admin-key"
-  },
   "headers": [
     {
       "source": "/(.*)",

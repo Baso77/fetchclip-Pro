@@ -1,4 +1,4 @@
-const BACKEND_URL = 'https://fetchclip-backend.onrender.com';
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'https://fetchclip-backend.onrender.com';
 
 export interface MediaFormat {
   formatId: string;
