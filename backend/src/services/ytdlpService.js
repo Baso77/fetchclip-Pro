@@ -10,20 +10,39 @@ const execFileAsync = promisify(execFile);
 const metaCache = new NodeCache({ stdTTL: parseInt(process.env.CACHE_TTL) || 300, checkperiod: 60 });
 
 function getYtDlpPath() {
+  // 1. Explicit env override
   if (process.env.YTDLP_PATH && fs.existsSync(process.env.YTDLP_PATH)) {
+    logger.info(`Using yt-dlp from YTDLP_PATH: ${process.env.YTDLP_PATH}`);
     return process.env.YTDLP_PATH;
   }
+
   const candidates = [
+    // Render: binary downloaded into project bin/ folder by render-build.sh
+    path.join(process.cwd(), 'bin', 'yt-dlp'),
+    // Railway/system installs
     '/usr/local/bin/yt-dlp',
     '/usr/bin/yt-dlp',
+    '/usr/local/sbin/yt-dlp',
+    // npm-installed wrapper (rarely works but try)
     path.join(process.cwd(), 'node_modules', '.bin', 'yt-dlp'),
+    // PATH fallback
     'yt-dlp',
   ];
+
   for (const c of candidates) {
     try {
-      if (c === 'yt-dlp' || fs.existsSync(c)) return c;
+      if (c === 'yt-dlp') {
+        logger.info('Using yt-dlp from system PATH');
+        return c;
+      }
+      if (fs.existsSync(c)) {
+        logger.info(`Found yt-dlp at: ${c}`);
+        return c;
+      }
     } catch {}
   }
+
+  logger.warn('yt-dlp not found in any known location, falling back to PATH');
   return 'yt-dlp';
 }
 

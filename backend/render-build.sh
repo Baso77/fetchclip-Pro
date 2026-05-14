@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 set -e
 
-echo "Installing ffmpeg and yt-dlp..."
-apt-get update -qq
-apt-get install -y ffmpeg python3-pip python3-setuptools
-pip3 install -U yt-dlp
+echo "==> Installing yt-dlp binary..."
 
-echo "yt-dlp version: $(yt-dlp --version)"
-echo "ffmpeg version: $(ffmpeg -version | head -1)"
-echo "Build complete."
+# Download yt-dlp binary directly into project bin folder
+mkdir -p ./bin
+curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ./bin/yt-dlp
+chmod +x ./bin/yt-dlp
+
+echo "==> yt-dlp version: $(./bin/yt-dlp --version)"
+
+echo "==> Running npm install..."
+npm install
+
+echo "==> Build complete."
