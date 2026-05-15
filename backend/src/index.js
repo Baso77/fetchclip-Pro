@@ -30,8 +30,6 @@ const allowedOrigins = [
   'http://localhost:3001',
 ].filter(Boolean);
 
-logger.info(`CORS allowed origins: ${allowedOrigins.join(', ')}`);
-
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' },
   contentSecurityPolicy: false,
@@ -39,59 +37,40 @@ app.use(helmet({
 
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow requests with no origin
-    // (mobile apps, curl, Postman, server-side requests)
-    if (!origin) {
+    if (!origin || allowedOrigins.some(o => origin.startsWith(o))) {
       return callback(null, true);
     }
-
-    // Exact match OR allow all Vercel preview domains
-    const isAllowed =
-      allowedOrigins.includes(origin) ||
-      origin.endsWith('.vercel.app');
-
-    if (isAllowed) {
-      return callback(null, true);
-    }
-
-    logger.warn(`CORS blocked origin: ${origin}`);
-    return callback(new Error(`CORS blocked for origin: ${origin}`));
+    logger.warn(`CORS rejected origin: ${origin}`);
+    callback(new Error('Not allowed by CORS'));
   },
-
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-
-  allowedHeaders: [
-    'Content-Type',
-    'Authorization',
-    'X-Admin-Key',
-  ],
-
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Admin-Key'],
   credentials: true,
-
-  optionsSuccessStatus: 200,
+  maxAge: 86400,
 }));
 
-// Explicit OPTIONS handling
 app.options('*', cors());
-
 app.use(compression());
+app.use(express.json({ limit: '10kb' }));
+app.use(express.urlencoded({ extended: false, limit: '10kb' }));
+app.use(morgan('combined', { stream: { write: msg => logger.http(msg.trim()) } }));
 
-app.use(express.json({
-  limit: '10kb',
-}));
+// ============================================================
+// PING ENDPOINT — Keep Render free tier alive (used by UptimeRobot)
+// Must be BEFORE rate limiters so pings are never blocked
+// ============================================================
+app.get('/ping', (req, res) => {
+  res.status(200).send('OK');
+});
 
-app.use(express.urlencoded({
-  extended: false,
-  limit: '10kb',
-}));
+// Also respond on root so UptimeRobot can ping base URL
+app.get('/', (req, res) => {
+  res.status(200).json({ status: 'ok', service: 'FetchClip Pro API' });
+});
 
-app.use(morgan('combined', {
-  stream: {
-    write: msg => logger.http(msg.trim()),
-  },
-}));
-
-// Routes
+// ============================================================
+// API ROUTES
+// ============================================================
 app.use('/api/fetch', strictRateLimiter, fetchRouter);
 app.use('/api/download', strictRateLimiter, downloadRouter);
 app.use('/api/health', healthRouter);
@@ -100,29 +79,23 @@ app.use('/api/contact', rateLimiter, contactRouter);
 app.use('/api/trending', rateLimiter, trendingRouter);
 app.use('/api/admin', adminRouter);
 
-// 404
 app.use((req, res) => {
-  res.status(404).json({
-    success: false,
-    error: 'Route not found',
-  });
+  res.status(404).json({ success: false, error: 'Route not found' });
 });
 
-// Error handler
 app.use(errorHandler);
 
 const server = app.listen(PORT, () => {
-  logger.info(
-    `FetchClip Pro backend running on port ${PORT} [${process.env.NODE_ENV}]`
-  );
+  logger.info(`FetchClip Pro backend running on port ${PORT} [${process.env.NODE_ENV || 'development'}]`);
 });
 
+// Increased timeouts — yt-dlp can take up to 30s
 server.timeout = 120000;
 server.keepAliveTimeout = 65000;
+server.headersTimeout = 70000;
 
 process.on('SIGTERM', () => {
   logger.info('SIGTERM received, closing server gracefully');
-
   server.close(() => {
     logger.info('Server closed');
     process.exit(0);
