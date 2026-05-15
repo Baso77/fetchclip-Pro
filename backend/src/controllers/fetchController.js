@@ -1,4 +1,4 @@
-const { urlSchema, isSupportedUrl, isYouTubeUrl, sanitizeUrl } = require('../utils/urlUtils');
+const { urlSchema, isSupportedUrl, sanitizeUrl } = require('../utils/urlUtils');
 const { extractMetadata } = require('../services/ytdlpService');
 const { logDownload, logAnalyticsEvent } = require('../services/supabaseService');
 const { logger } = require('../utils/logger');
@@ -22,19 +22,10 @@ async function fetchController(req, res, next) {
     return res.status(400).json({ success: false, error: 'Malformed URL', code: 'INVALID_URL' });
   }
 
-  // YouTube special case — coming soon
-  if (isYouTubeUrl(cleanUrl)) {
-    return res.status(422).json({
-      success: false,
-      error: '🚧 YouTube support is coming soon! We are working on it. For now, use TikTok, Instagram, Facebook, Twitter/X, or Pinterest.',
-      code: 'YOUTUBE_COMING_SOON',
-    });
-  }
-
   if (!isSupportedUrl(cleanUrl)) {
     return res.status(422).json({
       success: false,
-      error: 'This platform is not supported. Supported: Instagram, TikTok, Facebook, Twitter/X, Pinterest, Reddit, Vimeo.',
+      error: 'This platform is not supported. Supported: YouTube, Instagram, TikTok, Facebook, Twitter/X, Pinterest, Vimeo, Reddit.',
       code: 'UNSUPPORTED_PLATFORM',
     });
   }
@@ -42,6 +33,7 @@ async function fetchController(req, res, next) {
   try {
     const metadata = await extractMetadata(cleanUrl);
 
+    // Fire analytics in background — don't await
     logAnalyticsEvent({
       event: 'fetch',
       platform: metadata.platform,
