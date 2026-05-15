@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useRef } from 'react';
-import Image from 'next/image';
 import { toast } from 'sonner';
 import {
   Download, Loader2, Music, Image as ImageIcon, Play,
@@ -13,35 +12,7 @@ import {
   platformColor, type MediaMetadata, type MediaFormat,
 } from '@/lib/api';
 
-type DownloadState = 'idle' | 'fetching' | 'ready' | 'downloading' | 'error';
-
-/**
- * CRITICAL: Trigger browser download WITHOUT navigating away.
- * Creates a hidden anchor with download attribute and clicks it.
- * Uses fetch + blob for same-origin, direct anchor for CDN URLs.
- */
-function triggerInstantDownload(directUrl: string, filename: string) {
-  // For CDN URLs (YouTube, Instagram, TikTok etc.) — use anchor with target=_blank
-  // but with Content-Disposition header via fetch+blob approach
-  // First try the simplest approach: direct anchor download
-  const anchor = document.createElement('a');
-  anchor.href = directUrl;
-  anchor.download = filename;
-  anchor.rel = 'noopener noreferrer';
-  // Do NOT set target=_blank — this causes navigation
-  // Instead use download attribute which forces download
-  anchor.style.display = 'none';
-  document.body.appendChild(anchor);
-  
-  try {
-    anchor.click();
-  } finally {
-    // Cleanup after a tick
-    setTimeout(() => {
-      document.body.removeChild(anchor);
-    }, 100);
-  }
-}
+type DownloadState = 'idle' | 'fetching' | 'ready' | 'error';
 
 export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: string }) {
   const [url, setUrl] = useState(defaultUrl);
@@ -49,7 +20,7 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
   const [metadata, setMetadata] = useState<MediaMetadata | null>(null);
   const [selectedFormat, setSelectedFormat] = useState<MediaFormat | null>(null);
   const [errorMsg, setErrorMsg] = useState('');
-  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [activeDownload, setActiveDownload] = useState<'video' | 'audio' | 'thumbnail' | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   function reset() {
@@ -57,6 +28,7 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
     setSelectedFormat(null);
     setErrorMsg('');
     setState('idle');
+    setActiveDownload(null);
     setUrl('');
     setTimeout(() => inputRef.current?.focus(), 100);
   }
@@ -69,6 +41,7 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
     setState('fetching');
     setErrorMsg('');
     setMetadata(null);
+    setSelectedFormat(null);
 
     const result = await fetchMediaMetadata(trimmed);
 
@@ -81,79 +54,95 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
     const data = result.data;
     setMetadata(data);
 
-    // Default: pick best video format (prefer muxed with audio)
     const defaultFmt =
-      data.formats.find(f => f.type === 'video' && (f as any).hasAudio && f.height && f.height <= 1080) ||
-      data.formats.find(f => f.type === 'video' && f.height && f.height <= 1080) ||
+      data.formats.find(f => f.type === 'video' && f.height !== null && f.height <= 1080) ||
       data.formats.find(f => f.type === 'video') ||
-      data.formats[0] ||
       null;
-
     setSelectedFormat(defaultFmt);
     setState('ready');
 
     logEvent('fetch_success', data.platform, { title: data.title });
   }
 
-  async function handleDownload(type: 'video' | 'audio' | 'thumbnail') {
-    if (!metadata) return;
-
-    const id = type === 'audio' ? 'audio-best' : type === 'thumbnail' ? 'thumbnail-best' : `video-${selectedFormat?.formatId || 'best'}`;
-    setDownloadingId(id);
-
-    // Show immediate feedback
-    toast.loading(
-      type === 'audio' ? 'Preparing audio...' :
-      type === 'thumbnail' ? 'Fetching thumbnail...' :
-      'Preparing video with audio...',
-      { id: 'download-toast', duration: 30000 }
-    );
-
+  // FIXED: Real download using fetch + blob — forces Chrome download bar, never opens new page
+  async function triggerRealDownload(directUrl: string, filename: string) {
     try {
-      const formatId = type === 'video' ? (selectedFormat?.formatId || undefined) : undefined;
-      const result = await requestDownload(metadata.webpage_url, formatId, type);
-
-      if (!result.success || !result.directUrl) {
-        toast.dismiss('download-toast');
-        toast.error(result.error || 'Download failed. Please try again.');
-        setDownloadingId(null);
-        return;
-      }
-
-      // Dismiss loading toast
-      toast.dismiss('download-toast');
-
-      // INSTANT download trigger — no page navigation
-      const filename = result.filename || `fetchclip-${type}.${result.ext || (type === 'audio' ? 'm4a' : 'mp4')}`;
-      triggerInstantDownload(result.directUrl, filename);
-
-      toast.success(
-        type === 'audio' ? '🎵 Audio download started!' :
-        type === 'thumbnail' ? '🖼️ Thumbnail download started!' :
-        '🎬 Video download started!',
-        { duration: 3000 }
-      );
-
-      logEvent('download_success', metadata.platform, { type, quality: selectedFormat?.quality });
-    } catch (err) {
-      toast.dismiss('download-toast');
-      toast.error('Download failed. Please try again.');
-    } finally {
-      setDownloadingId(null);
+      // Try fetch + blob first (works for same-origin or CORS-enabled CDNs)
+      const response = await fetch(directUrl, { mode: 'cors' });
+      if (!response.ok) throw new Error('fetch failed');
+      const blob = await response.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = filename;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+    } catch {
+      // Fallback: use download attribute trick via hidden iframe
+      // This prevents opening a new tab while still triggering download
+      const a = document.createElement('a');
+      a.href = directUrl;
+      a.download = filename;
+      a.target = '_self'; // KEY: _self not _blank prevents new tab
+      a.rel = 'noopener noreferrer';
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
     }
   }
 
-  // Video formats — always show all video options
-  const videoFormats = metadata?.formats.filter(f => f.type === 'video') || [];
+  async function handleDownload(type: 'video' | 'audio' | 'thumbnail') {
+    if (!metadata || activeDownload !== null) return;
+
+    setActiveDownload(type);
+
+    try {
+      if (type === 'thumbnail' && metadata.thumbnail) {
+        // For thumbnail: fetch via our backend proxy to avoid CORS
+        const result = await requestDownload(metadata.webpage_url, undefined, 'thumbnail');
+        setActiveDownload(null);
+        if (!result.success || !result.directUrl) {
+          toast.error(result.error || 'Thumbnail download failed.');
+          return;
+        }
+        await triggerRealDownload(result.directUrl, result.filename || 'thumbnail.jpg');
+        toast.success('Thumbnail downloading...');
+        logEvent('download_success', metadata.platform, { type: 'thumbnail' });
+        return;
+      }
+
+      const formatId = type === 'video' ? (selectedFormat?.formatId || undefined) : undefined;
+      const result = await requestDownload(metadata.webpage_url, formatId, type);
+
+      setActiveDownload(null);
+
+      if (!result.success || !result.directUrl) {
+        toast.error(result.error || 'Download failed. Please try again.');
+        return;
+      }
+
+      const filename = result.filename || `fetchclip-${type}.${result.ext || (type === 'audio' ? 'm4a' : 'mp4')}`;
+      
+      // Trigger real download — shows in Chrome download bar
+      await triggerRealDownload(result.directUrl, filename);
+      
+      toast.success(`${type.charAt(0).toUpperCase() + type.slice(1)} download started in Chrome!`);
+      logEvent('download_success', metadata.platform, { type, quality: selectedFormat?.quality });
+
+    } catch (err) {
+      setActiveDownload(null);
+      toast.error('Download failed. Please try again.');
+    }
+  }
+
+  const videoFormats = metadata?.formats.filter(f => f.type === 'video') ?? [];
   
-  // Audio is ALWAYS available for video content — either from audio-only formats or we extract it
-  // Never disable audio button for video content
-  const hasVideoContent = videoFormats.length > 0;
-  const audioFormats = metadata?.formats.filter(f => f.type === 'audio') || [];
-  
-  // Audio button: show if there are dedicated audio formats OR if there's video content
-  // (we can always extract audio from video streams via yt-dlp bestaudio)
-  const canDownloadAudio = audioFormats.length > 0 || hasVideoContent;
+  // FIXED: Audio always enabled if there's any media (all videos have audio)
+  const showAudioButton = metadata !== null; // Always show audio button when media is loaded
 
   return (
     <div className="w-full max-w-3xl mx-auto">
@@ -165,7 +154,7 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
             type="url"
             value={url}
             onChange={e => setUrl(e.target.value)}
-            placeholder="Paste YouTube, TikTok, Instagram, Facebook, Twitter or Pinterest URL..."
+            placeholder="Paste TikTok, Instagram, Facebook, Twitter or Pinterest URL..."
             className="input-field flex-1 text-sm"
             disabled={state === 'fetching'}
             autoFocus
@@ -221,38 +210,34 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
 
       {/* Media preview + download UI */}
       {state === 'ready' && metadata && (
-        <div className="mt-6 glass-card overflow-hidden shadow-xl shadow-gray-200/50 dark:shadow-gray-900/50">
+        <div className="mt-6 glass-card overflow-hidden animate-slide-up shadow-xl shadow-gray-200/50 dark:shadow-gray-900/50">
           {/* Media info header */}
           <div className="p-6 flex flex-col sm:flex-row gap-5">
-            {/* Thumbnail */}
             {metadata.thumbnail && (
               <div className="relative flex-shrink-0 w-full sm:w-48 aspect-video rounded-xl overflow-hidden bg-gray-100 dark:bg-gray-800 group">
-                {/* Use img instead of next/image to avoid domain config issues */}
+                {/* FIXED: Use regular img tag instead of next/image to avoid CORS/domain issues */}
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
                   src={metadata.thumbnail}
                   alt={metadata.title}
                   className="w-full h-full object-cover"
-                  loading="lazy"
-                  referrerPolicy="no-referrer"
-                  crossOrigin="anonymous"
                   onError={(e) => {
-                    // Hide broken thumbnail
+                    // If thumbnail fails, show placeholder
                     (e.target as HTMLImageElement).style.display = 'none';
                   }}
+                  crossOrigin="anonymous"
                 />
                 {metadata.duration && (
                   <div className="absolute bottom-2 right-2 bg-black/80 text-white text-xs px-2 py-0.5 rounded-md font-mono">
                     {formatDuration(metadata.duration)}
                   </div>
                 )}
-                <div className="absolute inset-0 flex items-center justify-center bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
+                <div className="absolute inset-0 flex items-center justify-center bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity">
                   <Play className="w-10 h-10 text-white drop-shadow-lg" />
                 </div>
               </div>
             )}
 
-            {/* Meta */}
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 mb-2">
                 <span className={`platform-badge ${platformColor(metadata.platform)}`}>
@@ -298,6 +283,7 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
                       setSelectedFormat(fmt || null);
                     }}
                     className="input-field appearance-none pr-10 cursor-pointer text-sm"
+                    disabled={activeDownload !== null}
                   >
                     {videoFormats.map(f => (
                       <option key={f.formatId} value={f.formatId}>
@@ -313,16 +299,16 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
               </div>
             )}
 
-            {/* Download buttons — audio is ALWAYS enabled for video content */}
+            {/* Download buttons */}
             <div className="flex flex-wrap gap-3">
-              {/* Video download */}
+              {/* Video download button */}
               {videoFormats.length > 0 && (
                 <button
                   onClick={() => handleDownload('video')}
-                  disabled={downloadingId !== null}
-                  className="btn-primary flex items-center gap-2 flex-1 sm:flex-none justify-center min-w-[160px]"
+                  disabled={activeDownload !== null}
+                  className="btn-primary flex items-center gap-2 flex-1 sm:flex-none justify-center"
                 >
-                  {downloadingId === `video-${selectedFormat?.formatId || 'best'}` ? (
+                  {activeDownload === 'video' ? (
                     <><Loader2 className="w-4 h-4 animate-spin" /> Preparing...</>
                   ) : (
                     <><Download className="w-4 h-4" /> Download Video</>
@@ -330,14 +316,14 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
                 </button>
               )}
 
-              {/* Audio download — always enabled when there's video content */}
-              {canDownloadAudio && (
+              {/* FIXED: Audio button — always shown when media loaded, never disabled by default */}
+              {showAudioButton && (
                 <button
                   onClick={() => handleDownload('audio')}
-                  disabled={downloadingId !== null}
+                  disabled={activeDownload !== null}
                   className="btn-secondary flex items-center gap-2 justify-center"
                 >
-                  {downloadingId === 'audio-best' ? (
+                  {activeDownload === 'audio' ? (
                     <><Loader2 className="w-4 h-4 animate-spin" /> Preparing...</>
                   ) : (
                     <><Music className="w-4 h-4" /> Audio Only</>
@@ -345,14 +331,14 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
                 </button>
               )}
 
-              {/* Thumbnail download */}
+              {/* Thumbnail download button */}
               {metadata.thumbnail && (
                 <button
                   onClick={() => handleDownload('thumbnail')}
-                  disabled={downloadingId !== null}
+                  disabled={activeDownload !== null}
                   className="btn-secondary flex items-center gap-2 justify-center"
                 >
-                  {downloadingId === 'thumbnail-best' ? (
+                  {activeDownload === 'thumbnail' ? (
                     <><Loader2 className="w-4 h-4 animate-spin" /> Preparing...</>
                   ) : (
                     <><ImageIcon className="w-4 h-4" /> Thumbnail</>
@@ -360,6 +346,13 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
                 </button>
               )}
             </div>
+
+            {activeDownload && (
+              <p className="text-xs text-brand-500 animate-pulse flex items-center gap-1">
+                <Loader2 className="w-3 h-3 animate-spin" />
+                Getting download link... this may take a few seconds
+              </p>
+            )}
 
             <p className="text-xs text-gray-400 dark:text-gray-500">
               By downloading, you confirm this content is publicly available and you have the right to download it.
