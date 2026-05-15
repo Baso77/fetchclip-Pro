@@ -3,7 +3,7 @@ const router = express.Router();
 const { z } = require('zod');
 const { getDownloadUrl } = require('../services/ytdlpService');
 const { logDownload } = require('../services/supabaseService');
-const { urlSchema, sanitizeUrl, isSupportedUrl, detectPlatform } = require('../utils/urlUtils');
+const { urlSchema, sanitizeUrl, isSupportedUrl, isYouTubeUrl, detectPlatform } = require('../utils/urlUtils');
 const { logger } = require('../utils/logger');
 
 const downloadSchema = z.object({
@@ -27,7 +27,20 @@ router.post('/', async (req, res, next) => {
   }
 
   const cleanUrl = sanitizeUrl(parsed.url);
-  if (!cleanUrl || !isSupportedUrl(cleanUrl)) {
+  if (!cleanUrl) {
+    return res.status(400).json({ success: false, error: 'Invalid URL', code: 'INVALID_URL' });
+  }
+
+  // YouTube special case
+  if (isYouTubeUrl(cleanUrl)) {
+    return res.status(422).json({
+      success: false,
+      error: '🚧 YouTube support is coming soon!',
+      code: 'YOUTUBE_COMING_SOON',
+    });
+  }
+
+  if (!isSupportedUrl(cleanUrl)) {
     return res.status(400).json({ success: false, error: 'Invalid or unsupported URL', code: 'INVALID_URL' });
   }
 
@@ -41,11 +54,17 @@ router.post('/', async (req, res, next) => {
         return res.status(404).json({ success: false, error: 'No thumbnail available', code: 'NO_THUMBNAIL' });
       }
       logDownload({ url: cleanUrl, platform, title: meta.title, type: 'thumbnail', ip, success: true }).catch(() => {});
-      return res.json({ success: true, directUrl: meta.thumbnail, filename: `thumbnail.jpg`, type: 'thumbnail' });
+      return res.json({ 
+        success: true, 
+        directUrl: meta.thumbnail, 
+        filename: `thumbnail-${Date.now()}.jpg`, 
+        type: 'thumbnail' 
+      });
     }
 
+    // FIXED: For audio, always use bestaudio selector regardless of formatId
     const formatId = parsed.type === 'audio'
-      ? 'bestaudio[ext=m4a]/bestaudio/best'
+      ? 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best'
       : (parsed.formatId || 'best[ext=mp4][height<=1080]/best[ext=mp4]/best');
 
     const { directUrl, ext, title } = await getDownloadUrl(cleanUrl, formatId);
@@ -54,8 +73,9 @@ router.post('/', async (req, res, next) => {
       throw new Error('DOWNLOAD_URL_FAILED');
     }
 
-    const safeTitle = (title || 'video').replace(/[^a-zA-Z0-9\s\-_]/g, '').slice(0, 80).trim();
-    const filename = `${safeTitle}.${ext}`;
+    const safeTitle = (title || 'video').replace(/[^a-zA-Z0-9\s\-_]/g, '').slice(0, 80).trim() || 'fetchclip';
+    const fileExt = parsed.type === 'audio' ? (ext || 'm4a') : (ext || 'mp4');
+    const filename = `${safeTitle}.${fileExt}`;
 
     logDownload({
       url: cleanUrl, platform, title, quality: parsed.formatId || 'best',
@@ -68,7 +88,7 @@ router.post('/', async (req, res, next) => {
       success: true,
       directUrl,
       filename,
-      ext,
+      ext: fileExt,
       type: parsed.type,
     });
   } catch (err) {

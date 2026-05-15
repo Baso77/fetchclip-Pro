@@ -2,16 +2,12 @@
 const nextConfig = {
   reactStrictMode: true,
   images: {
+    // Allow any remote image — needed for thumbnails from various CDNs
     remotePatterns: [
-      { protocol: 'https', hostname: 'i.ytimg.com' },
-      { protocol: 'https', hostname: 'img.youtube.com' },
-      { protocol: 'https', hostname: '**.cdninstagram.com' },
-      { protocol: 'https', hostname: '**.fbcdn.net' },
-      { protocol: 'https', hostname: '**.tiktokcdn.com' },
-      { protocol: 'https', hostname: 'pbs.twimg.com' },
-      { protocol: 'https', hostname: '**.pinimg.com' },
-      { protocol: 'https', hostname: '**.vimeocdn.com' },
+      { protocol: 'https', hostname: '**' }, // allow all HTTPS image sources
     ],
+    // Use unoptimized to avoid Next.js processing issues with external CDN images
+    unoptimized: true,
     formats: ['image/avif', 'image/webp'],
   },
   async headers() {
@@ -29,7 +25,8 @@ const nextConfig = {
   },
   async redirects() {
     return [
-      { source: '/youtube-downloader', destination: '/tools/youtube-downloader', permanent: true },
+      // YouTube redirect to coming soon notice
+      { source: '/tools/youtube-downloader', destination: '/?youtube=soon', permanent: false },
     ];
   },
 };

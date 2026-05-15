@@ -1,16 +1,16 @@
 import Link from 'next/link';
-import { Download } from 'lucide-react';
+import { Download, Clock } from 'lucide-react';
 
 export default function Footer() {
   const currentYear = new Date().getFullYear();
 
   const tools = [
-    { href: '/tools/youtube-downloader', label: 'YouTube Downloader' },
-    { href: '/tools/tiktok-downloader', label: 'TikTok Downloader' },
-    { href: '/tools/instagram-downloader', label: 'Instagram Downloader' },
-    { href: '/tools/twitter-downloader', label: 'Twitter Downloader' },
-    { href: '/tools/facebook-downloader', label: 'Facebook Downloader' },
-    { href: '/tools/pinterest-downloader', label: 'Pinterest Downloader' },
+    { href: '/tools/tiktok-downloader', label: 'TikTok Downloader', comingSoon: false },
+    { href: '/tools/instagram-downloader', label: 'Instagram Downloader', comingSoon: false },
+    { href: '/tools/twitter-downloader', label: 'Twitter Downloader', comingSoon: false },
+    { href: '/tools/facebook-downloader', label: 'Facebook Downloader', comingSoon: false },
+    { href: '/tools/pinterest-downloader', label: 'Pinterest Downloader', comingSoon: false },
+    { href: '/tools/youtube-downloader', label: 'YouTube Downloader', comingSoon: true },
   ];
 
   const company = [
@@ -44,8 +44,14 @@ export default function Footer() {
             <ul className="space-y-2">
               {tools.map(t => (
                 <li key={t.href}>
-                  <Link href={t.href} className="text-sm text-gray-500 dark:text-gray-400 hover:text-brand-500 dark:hover:text-brand-400 transition-colors">
+                  <Link href={t.href} className="text-sm text-gray-500 dark:text-gray-400 hover:text-brand-500 dark:hover:text-brand-400 transition-colors flex items-center gap-2">
                     {t.label}
+                    {t.comingSoon && (
+                      <span className="inline-flex items-center gap-0.5 bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 text-xs px-1.5 py-0.5 rounded-full">
+                        <Clock className="w-2.5 h-2.5" />
+                        Soon
+                      </span>
+                    )}
                   </Link>
                 </li>
               ))}
