@@ -4,12 +4,13 @@ import { useState, useRef } from 'react';
 import { toast } from 'sonner';
 import {
   Download, Loader2, Music, Image as ImageIcon, Play,
-  Clock, Eye, User, X, ChevronDown, AlertCircle
+  Clock, Eye, User, X, ChevronDown, AlertCircle,
 } from 'lucide-react';
 import {
   fetchMediaMetadata, requestDownload,
-  logEvent, formatDuration, formatFileSize, platformDisplayName,
-  platformColor, type MediaMetadata, type MediaFormat,
+  logEvent, formatDuration, formatFileSize,
+  platformDisplayName, platformColor,
+  type MediaMetadata, type MediaFormat,
 } from '@/lib/api';
 
 type DownloadState = 'idle' | 'fetching' | 'ready' | 'error';
@@ -60,17 +61,16 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
       null;
     setSelectedFormat(defaultFmt);
     setState('ready');
-
     logEvent('fetch_success', data.platform, { title: data.title });
   }
 
-  // FIXED: Real download using fetch + blob — forces Chrome download bar, never opens new page
-  async function triggerRealDownload(directUrl: string, filename: string) {
+  // Triggers a real browser download — shows in Chrome's download bar, never opens new tab
+  async function triggerBrowserDownload(directUrl: string, filename: string) {
     try {
-      // Try fetch + blob first (works for same-origin or CORS-enabled CDNs)
-      const response = await fetch(directUrl, { mode: 'cors' });
-      if (!response.ok) throw new Error('fetch failed');
-      const blob = await response.blob();
+      // Attempt fetch→blob (best: forces Chrome download bar)
+      const resp = await fetch(directUrl);
+      if (!resp.ok) throw new Error('fetch failed');
+      const blob = await resp.blob();
       const blobUrl = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = blobUrl;
@@ -79,15 +79,13 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 30000);
     } catch {
-      // Fallback: use download attribute trick via hidden iframe
-      // This prevents opening a new tab while still triggering download
+      // Fallback: anchor with _self — avoids new tab
       const a = document.createElement('a');
       a.href = directUrl;
       a.download = filename;
-      a.target = '_self'; // KEY: _self not _blank prevents new tab
-      a.rel = 'noopener noreferrer';
+      a.target = '_self';
       a.style.display = 'none';
       document.body.appendChild(a);
       a.click();
@@ -97,52 +95,36 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
 
   async function handleDownload(type: 'video' | 'audio' | 'thumbnail') {
     if (!metadata || activeDownload !== null) return;
-
     setActiveDownload(type);
 
     try {
-      if (type === 'thumbnail' && metadata.thumbnail) {
-        // For thumbnail: fetch via our backend proxy to avoid CORS
-        const result = await requestDownload(metadata.webpage_url, undefined, 'thumbnail');
-        setActiveDownload(null);
-        if (!result.success || !result.directUrl) {
-          toast.error(result.error || 'Thumbnail download failed.');
-          return;
-        }
-        await triggerRealDownload(result.directUrl, result.filename || 'thumbnail.jpg');
-        toast.success('Thumbnail downloading...');
-        logEvent('download_success', metadata.platform, { type: 'thumbnail' });
-        return;
-      }
-
       const formatId = type === 'video' ? (selectedFormat?.formatId || undefined) : undefined;
       const result = await requestDownload(metadata.webpage_url, formatId, type);
 
-      setActiveDownload(null);
-
       if (!result.success || !result.directUrl) {
         toast.error(result.error || 'Download failed. Please try again.');
+        setActiveDownload(null);
         return;
       }
 
-      const filename = result.filename || `fetchclip-${type}.${result.ext || (type === 'audio' ? 'm4a' : 'mp4')}`;
-      
-      // Trigger real download — shows in Chrome download bar
-      await triggerRealDownload(result.directUrl, filename);
-      
-      toast.success(`${type.charAt(0).toUpperCase() + type.slice(1)} download started in Chrome!`);
-      logEvent('download_success', metadata.platform, { type, quality: selectedFormat?.quality });
+      const ext = result.ext || (type === 'audio' ? 'm4a' : type === 'thumbnail' ? 'jpg' : 'mp4');
+      const filename = result.filename || `fetchclip-${type}.${ext}`;
 
-    } catch (err) {
-      setActiveDownload(null);
+      await triggerBrowserDownload(result.directUrl, filename);
+      toast.success(`${type.charAt(0).toUpperCase() + type.slice(1)} is downloading!`);
+      logEvent('download_success', metadata.platform, { type, quality: selectedFormat?.quality });
+    } catch {
       toast.error('Download failed. Please try again.');
+    } finally {
+      setActiveDownload(null);
     }
   }
 
   const videoFormats = metadata?.formats.filter(f => f.type === 'video') ?? [];
-  
-  // FIXED: Audio always enabled if there's any media (all videos have audio)
-  const showAudioButton = metadata !== null; // Always show audio button when media is loaded
+
+  // Audio button: show whenever any media is loaded
+  // Backend uses bestaudio selector so it always works even without explicit audio formats
+  const showAudioButton = metadata !== null;
 
   return (
     <div className="w-full max-w-3xl mx-auto">
@@ -183,7 +165,7 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
         </form>
       </div>
 
-      {/* Error state */}
+      {/* Error */}
       {state === 'error' && (
         <div className="mt-4 p-4 rounded-xl bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 flex items-start gap-3">
           <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
@@ -208,24 +190,30 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
         </div>
       )}
 
-      {/* Media preview + download UI */}
+      {/* Ready state */}
       {state === 'ready' && metadata && (
         <div className="mt-6 glass-card overflow-hidden animate-slide-up shadow-xl shadow-gray-200/50 dark:shadow-gray-900/50">
-          {/* Media info header */}
+
+          {/* Media info */}
           <div className="p-6 flex flex-col sm:flex-row gap-5">
-            {metadata.thumbnail && (
+
+            {/* Thumbnail — uses plain <img> to avoid Next.js domain restrictions */}
+            {metadata.thumbnail ? (
               <div className="relative flex-shrink-0 w-full sm:w-48 aspect-video rounded-xl overflow-hidden bg-gray-100 dark:bg-gray-800 group">
-                {/* FIXED: Use regular img tag instead of next/image to avoid CORS/domain issues */}
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
                   src={metadata.thumbnail}
                   alt={metadata.title}
                   className="w-full h-full object-cover"
-                  onError={(e) => {
-                    // If thumbnail fails, show placeholder
-                    (e.target as HTMLImageElement).style.display = 'none';
+                  referrerPolicy="no-referrer"
+                  onError={e => {
+                    const el = e.currentTarget as HTMLImageElement;
+                    el.style.display = 'none';
+                    const parent = el.parentElement;
+                    if (parent) {
+                      parent.innerHTML = `<div class="w-full h-full flex items-center justify-center text-gray-400 text-xs">No preview</div>`;
+                    }
                   }}
-                  crossOrigin="anonymous"
                 />
                 {metadata.duration && (
                   <div className="absolute bottom-2 right-2 bg-black/80 text-white text-xs px-2 py-0.5 rounded-md font-mono">
@@ -235,6 +223,10 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
                 <div className="absolute inset-0 flex items-center justify-center bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity">
                   <Play className="w-10 h-10 text-white drop-shadow-lg" />
                 </div>
+              </div>
+            ) : (
+              <div className="flex-shrink-0 w-full sm:w-48 aspect-video rounded-xl bg-gray-100 dark:bg-gray-800 flex items-center justify-center text-gray-400 text-xs">
+                No preview
               </div>
             )}
 
@@ -267,9 +259,9 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
             </div>
           </div>
 
-          {/* Format selector + Download buttons */}
+          {/* Formats + buttons */}
           <div className="px-6 pb-6 space-y-4 border-t border-gray-100 dark:border-gray-800 pt-5">
-            {/* Quality selector */}
+
             {videoFormats.length > 0 && (
               <div>
                 <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-2 uppercase tracking-wide">
@@ -299,9 +291,8 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
               </div>
             )}
 
-            {/* Download buttons */}
             <div className="flex flex-wrap gap-3">
-              {/* Video download button */}
+              {/* Download Video (with audio) */}
               {videoFormats.length > 0 && (
                 <button
                   onClick={() => handleDownload('video')}
@@ -316,7 +307,7 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
                 </button>
               )}
 
-              {/* FIXED: Audio button — always shown when media loaded, never disabled by default */}
+              {/* Audio Only — always shown */}
               {showAudioButton && (
                 <button
                   onClick={() => handleDownload('audio')}
@@ -331,7 +322,7 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
                 </button>
               )}
 
-              {/* Thumbnail download button */}
+              {/* Thumbnail */}
               {metadata.thumbnail && (
                 <button
                   onClick={() => handleDownload('thumbnail')}
@@ -349,8 +340,8 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
 
             {activeDownload && (
               <p className="text-xs text-brand-500 animate-pulse flex items-center gap-1">
-                <Loader2 className="w-3 h-3 animate-spin" />
-                Getting download link... this may take a few seconds
+                <Loader2 className="w-3 h-3 animate-spin inline" />
+                Getting download link… this may take a few seconds
               </p>
             )}
 

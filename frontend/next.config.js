@@ -2,13 +2,10 @@
 const nextConfig = {
   reactStrictMode: true,
   images: {
-    // Allow any remote image — needed for thumbnails from various CDNs
-    remotePatterns: [
-      { protocol: 'https', hostname: '**' }, // allow all HTTPS image sources
-    ],
-    // Use unoptimized to avoid Next.js processing issues with external CDN images
+    // unoptimized = true means Next.js won't process external images,
+    // which lets ANY CDN URL (Instagram, TikTok, Facebook, etc.) load directly.
+    // This fixes the "thumbnail not showing" issue caused by domain restrictions.
     unoptimized: true,
-    formats: ['image/avif', 'image/webp'],
   },
   async headers() {
     return [
@@ -24,10 +21,7 @@ const nextConfig = {
     ];
   },
   async redirects() {
-    return [
-      // YouTube redirect to coming soon notice
-      { source: '/tools/youtube-downloader', destination: '/?youtube=soon', permanent: false },
-    ];
+    return [];
   },
 };
 

@@ -3,7 +3,7 @@ const router = express.Router();
 const { z } = require('zod');
 const { getDownloadUrl } = require('../services/ytdlpService');
 const { logDownload } = require('../services/supabaseService');
-const { urlSchema, sanitizeUrl, isSupportedUrl, isYouTubeUrl, detectPlatform } = require('../utils/urlUtils');
+const { urlSchema, sanitizeUrl, isSupportedUrl, detectPlatform } = require('../utils/urlUtils');
 const { logger } = require('../utils/logger');
 
 const downloadSchema = z.object({
@@ -27,26 +27,14 @@ router.post('/', async (req, res, next) => {
   }
 
   const cleanUrl = sanitizeUrl(parsed.url);
-  if (!cleanUrl) {
-    return res.status(400).json({ success: false, error: 'Invalid URL', code: 'INVALID_URL' });
-  }
-
-  // YouTube special case
-  if (isYouTubeUrl(cleanUrl)) {
-    return res.status(422).json({
-      success: false,
-      error: '🚧 YouTube support is coming soon!',
-      code: 'YOUTUBE_COMING_SOON',
-    });
-  }
-
-  if (!isSupportedUrl(cleanUrl)) {
+  if (!cleanUrl || !isSupportedUrl(cleanUrl)) {
     return res.status(400).json({ success: false, error: 'Invalid or unsupported URL', code: 'INVALID_URL' });
   }
 
   const platform = detectPlatform(cleanUrl);
 
   try {
+    // ── THUMBNAIL ──────────────────────────────────────────────────────────────
     if (parsed.type === 'thumbnail') {
       const { extractMetadata } = require('../services/ytdlpService');
       const meta = await extractMetadata(cleanUrl);
@@ -54,43 +42,72 @@ router.post('/', async (req, res, next) => {
         return res.status(404).json({ success: false, error: 'No thumbnail available', code: 'NO_THUMBNAIL' });
       }
       logDownload({ url: cleanUrl, platform, title: meta.title, type: 'thumbnail', ip, success: true }).catch(() => {});
-      return res.json({ 
-        success: true, 
-        directUrl: meta.thumbnail, 
-        filename: `thumbnail-${Date.now()}.jpg`, 
-        type: 'thumbnail' 
+      return res.json({
+        success: true,
+        directUrl: meta.thumbnail,
+        filename: `thumbnail-${Date.now()}.jpg`,
+        type: 'thumbnail',
       });
     }
 
-    // FIXED: For audio, always use bestaudio selector regardless of formatId
-    const formatId = parsed.type === 'audio'
-      ? 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best'
-      : (parsed.formatId || 'best[ext=mp4][height<=1080]/best[ext=mp4]/best');
+    // ── AUDIO ONLY ─────────────────────────────────────────────────────────────
+    if (parsed.type === 'audio') {
+      const { directUrl, ext, title } = await getDownloadUrl(
+        cleanUrl,
+        'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best'
+      );
+      if (!directUrl) throw new Error('DOWNLOAD_URL_FAILED');
 
-    const { directUrl, ext, title } = await getDownloadUrl(cleanUrl, formatId);
+      const safeTitle = (title || 'audio').replace(/[^a-zA-Z0-9\s\-_]/g, '').slice(0, 80).trim() || 'fetchclip-audio';
+      logDownload({ url: cleanUrl, platform, title, type: 'audio', ip, userAgent: req.headers['user-agent'], success: true }).catch(() => {});
 
-    if (!directUrl) {
-      throw new Error('DOWNLOAD_URL_FAILED');
+      return res.json({
+        success: true,
+        directUrl,
+        filename: `${safeTitle}.${ext || 'm4a'}`,
+        ext: ext || 'm4a',
+        type: 'audio',
+      });
     }
 
-    const safeTitle = (title || 'video').replace(/[^a-zA-Z0-9\s\-_]/g, '').slice(0, 80).trim() || 'fetchclip';
-    const fileExt = parsed.type === 'audio' ? (ext || 'm4a') : (ext || 'mp4');
-    const filename = `${safeTitle}.${fileExt}`;
+    // ── VIDEO (with audio) ─────────────────────────────────────────────────────
+    // CRITICAL: Most social platforms (Instagram, TikTok, Facebook, Twitter)
+    // serve combined streams (video + audio in one file). We MUST pick a
+    // format where acodec != 'none'. Picking a video-only stream causes
+    // silent/muted downloads.
+    //
+    // Selector priority:
+    //  1. Best single-file MP4 ≤1080p that has BOTH video AND audio
+    //  2. Best single-file with both codecs (any resolution)
+    //  3. Best mp4 (fallback)
+    //  4. Absolute best (last resort)
+    const combinedSelector =
+      'best[ext=mp4][vcodec!=none][acodec!=none][height<=1080]' +
+      '/best[ext=mp4][vcodec!=none][acodec!=none]' +
+      '/best[vcodec!=none][acodec!=none][height<=1080]' +
+      '/best[vcodec!=none][acodec!=none]' +
+      '/best[ext=mp4]' +
+      '/best';
 
+    const { directUrl, ext, title } = await getDownloadUrl(cleanUrl, combinedSelector);
+    if (!directUrl) throw new Error('DOWNLOAD_URL_FAILED');
+
+    const safeTitle = (title || 'video').replace(/[^a-zA-Z0-9\s\-_]/g, '').slice(0, 80).trim() || 'fetchclip';
     logDownload({
-      url: cleanUrl, platform, title, quality: parsed.formatId || 'best',
-      type: parsed.type, ip, userAgent: req.headers['user-agent'], success: true,
+      url: cleanUrl, platform, title,
+      quality: 'best-combined-av',
+      type: 'video', ip, userAgent: req.headers['user-agent'], success: true,
     }).catch(() => {});
 
-    logger.info(`Download URL generated for ${platform}: ${safeTitle}`);
-
+    logger.info(`Video+Audio download for ${platform}: ${safeTitle}`);
     return res.json({
       success: true,
       directUrl,
-      filename,
-      ext: fileExt,
-      type: parsed.type,
+      filename: `${safeTitle}.${ext || 'mp4'}`,
+      ext: ext || 'mp4',
+      type: 'video',
     });
+
   } catch (err) {
     logDownload({ url: cleanUrl, platform, success: false, error: err.message, ip }).catch(() => {});
     return next(err);
