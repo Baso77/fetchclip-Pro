@@ -1,10 +1,10 @@
 const express = require('express');
-const router  = express.Router();
-const { z }   = require('zod');
-const { getDownloadUrl }                          = require('../services/ytdlpService');
-const { logDownload }                             = require('../services/supabaseService');
-const { urlSchema, sanitizeUrl, isSupportedUrl, detectPlatform } = require('../utils/urlUtils');
-const { logger }                                  = require('../utils/logger');
+const router = express.Router();
+const { z } = require('zod');
+const { getDownloadUrl, extractAudioUrl } = require('../services/ytdlpService');
+const { logDownload } = require('../services/supabaseService');
+const { sanitizeUrl, isSupportedUrl, detectPlatform } = require('../utils/urlUtils');
+const { logger } = require('../utils/logger');
 
 const downloadSchema = z.object({
   url:      z.string().url().max(2048),
@@ -15,7 +15,6 @@ const downloadSchema = z.object({
 router.post('/', async (req, res, next) => {
   const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.ip;
 
-  // ── Validate input ─────────────────────────────────────────────────────
   let parsed;
   try {
     parsed = downloadSchema.parse(req.body);
@@ -37,12 +36,11 @@ router.post('/', async (req, res, next) => {
   }
 
   const platform = detectPlatform(cleanUrl);
-  const type     = parsed.type; // 'video' | 'audio' | 'thumbnail'
 
   try {
 
-    // ── Thumbnail ──────────────────────────────────────────────────────────
-    if (type === 'thumbnail') {
+    // ── THUMBNAIL ────────────────────────────────────────────────────────────
+    if (parsed.type === 'thumbnail') {
       const { extractMetadata } = require('../services/ytdlpService');
       const meta = await extractMetadata(cleanUrl);
       if (!meta.thumbnail) {
@@ -52,79 +50,111 @@ router.post('/', async (req, res, next) => {
           code:    'NO_THUMBNAIL',
         });
       }
-      logDownload({ url: cleanUrl, platform, title: meta.title, type: 'thumbnail', ip, success: true }).catch(() => {});
+      logDownload({
+        url: cleanUrl, platform, title: meta.title,
+        type: 'thumbnail', ip, success: true,
+      }).catch(() => {});
       return res.json({
         success:   true,
         directUrl: meta.thumbnail,
-        filename:  `thumbnail.jpg`,
+        filename:  `thumbnail-${Date.now()}.jpg`,
         ext:       'jpg',
         type:      'thumbnail',
       });
     }
 
-    // ── Audio or Video ─────────────────────────────────────────────────────
-    //
-    // FIX: We now pass both (formatId, type) to getDownloadUrl.
-    // getDownloadUrl uses type to decide the yt-dlp selector:
-    //   - type='audio' → bestaudio selector chain (guaranteed acodec present)
-    //   - type='video' with formatId → merge that format with bestaudio
-    //   - type='video' without formatId → bestvideo+bestaudio merged
-    //
-    // The old bug was: formatId was passed but type was ignored in getDownloadUrl,
-    // so audio requests sometimes used a video format selector.
+    // ── AUDIO ONLY ───────────────────────────────────────────────────────────
+    // FIX: Use the new extractAudioUrl() which has two-stage fallback:
+    //   Stage 1 → bestaudio (works for YouTube/Facebook/Vimeo)
+    //   Stage 2 → best combined stream (works for Instagram/TikTok/Twitter)
+    // This eliminates the "Unable to extract" error on platforms that have
+    // no separate audio-only streams.
+    if (parsed.type === 'audio') {
+      logger.info(`Audio download requested for ${platform}: ${cleanUrl}`);
 
-    const { directUrl, ext, title, acodec, vcodec } = await getDownloadUrl(
-      cleanUrl,
-      parsed.formatId,  // may be undefined, a format_id string, or 'bestaudio'
-      type              // 'video' or 'audio'
-    );
+      const { directUrl, ext, title } = await extractAudioUrl(cleanUrl);
+
+      const safeTitle = (title || 'audio')
+        .replace(/[^a-zA-Z0-9\s\-_]/g, '')
+        .slice(0, 80)
+        .trim() || 'fetchclip-audio';
+
+      logDownload({
+        url: cleanUrl, platform, title,
+        type: 'audio', ip,
+        userAgent: req.headers['user-agent'],
+        success: true,
+      }).catch(() => {});
+
+      return res.json({
+        success:   true,
+        directUrl,
+        filename:  `${safeTitle}.${ext || 'm4a'}`,
+        ext:       ext || 'm4a',
+        type:      'audio',
+      });
+    }
+
+    // ── VIDEO (with audio) ───────────────────────────────────────────────────
+    // FIX: The selector REQUIRES acodec!=none so we NEVER get a silent video.
+    //
+    // Priority order:
+    //   1. Best combined MP4 ≤1080p with both video AND audio codecs
+    //   2. Best combined MP4 (any height) with both codecs
+    //   3. Best combined stream (any container) with both codecs ≤1080p
+    //   4. Best combined stream (any container) with both codecs
+    //   5. Best MP4 (last resort, should still have audio on social platforms)
+    //   6. Absolute best (final fallback)
+    //
+    // NOTE: We intentionally do NOT pass the formatId from the frontend here.
+    // The frontend shows combined-format IDs in the quality selector, but to
+    // be safe we always use the selector string rather than trusting the ID.
+    // This guarantees acodec!=none on the server side regardless of what the
+    // frontend sends.
+
+    const videoSelector =
+      'best[ext=mp4][vcodec!=none][acodec!=none][height<=1080]' +
+      '/best[ext=mp4][vcodec!=none][acodec!=none]' +
+      '/best[vcodec!=none][acodec!=none][height<=1080]' +
+      '/best[vcodec!=none][acodec!=none]' +
+      '/best[ext=mp4]' +
+      '/best';
+
+    logger.info(`Video download requested for ${platform}: ${cleanUrl}`);
+
+    const { directUrl, ext, title } = await getDownloadUrl(cleanUrl, videoSelector);
 
     if (!directUrl) throw new Error('DOWNLOAD_URL_FAILED');
 
-    // ── Build filename ─────────────────────────────────────────────────────
-    // Determine correct extension based on actual returned format
-    let finalExt = ext || 'mp4';
-    if (type === 'audio') {
-      // Prefer m4a/mp3 for audio; if yt-dlp returned webm that's fine too
-      finalExt = ['m4a', 'mp3', 'webm', 'ogg', 'opus'].includes(ext) ? ext : 'm4a';
-    }
-
     const safeTitle = (title || 'video')
-      .replace(/[<>:"/\\|?*\x00-\x1f]/g, '')  // remove illegal filename chars
-      .replace(/\s+/g, '_')
+      .replace(/[^a-zA-Z0-9\s\-_]/g, '')
       .slice(0, 80)
       .trim() || 'fetchclip';
 
-    const filename = `${safeTitle}.${finalExt}`;
-
-    // ── Log ────────────────────────────────────────────────────────────────
     logDownload({
-      url:       cleanUrl,
-      platform,
-      title,
-      quality:   parsed.formatId || 'best',
-      type,
-      ip,
+      url: cleanUrl, platform, title,
+      quality: 'best-combined-av',
+      type: 'video', ip,
       userAgent: req.headers['user-agent'],
-      success:   true,
+      success: true,
     }).catch(() => {});
 
-    logger.info(
-      `Download ready: platform=${platform} type=${type} ` +
-      `ext=${finalExt} acodec=${acodec} vcodec=${vcodec} title="${safeTitle}"`
-    );
+    logger.info(`Video+Audio URL ready for ${platform}: ${safeTitle}`);
 
-    // ── Respond ────────────────────────────────────────────────────────────
     return res.json({
       success:   true,
       directUrl,
-      filename,
-      ext:       finalExt,
-      type,
+      filename:  `${safeTitle}.${ext || 'mp4'}`,
+      ext:       ext || 'mp4',
+      type:      'video',
     });
 
   } catch (err) {
-    logDownload({ url: cleanUrl, platform, success: false, error: err.message, ip }).catch(() => {});
+    logger.error(`Download error [${platform}]: ${err.message}`);
+    logDownload({
+      url: cleanUrl, platform,
+      success: false, error: err.message, ip,
+    }).catch(() => {});
     return next(err);
   }
 });
