@@ -12,7 +12,6 @@ const metaCache = new NodeCache({
   checkperiod: 60,
 });
 
-// ─── yt-dlp binary discovery ─────────────────────────────────────────────────
 function getYtDlpPath() {
   if (process.env.YTDLP_PATH && fs.existsSync(process.env.YTDLP_PATH)) {
     return process.env.YTDLP_PATH;
@@ -33,90 +32,60 @@ function getYtDlpPath() {
 }
 const YTDLP_PATH = getYtDlpPath();
 
-// ─── Stream classification helpers ──────────────────────────────────────────
-
-/** Has a real video codec AND a playable HTTP URL */
-function isVideoStream(f) {
-  return (
-    f.vcodec && f.vcodec !== 'none' &&
-    f.url && f.url.startsWith('http')
-  );
-}
-
-/** Has no video, has audio, has a playable HTTP URL */
-function isAudioOnlyStream(f) {
-  return (
-    (!f.vcodec || f.vcodec === 'none') &&
-    f.acodec && f.acodec !== 'none' &&
-    f.url && f.url.startsWith('http')
-  );
-}
-
-/** Video stream that ALSO carries audio (merged/HLS stream) */
-function videoHasEmbeddedAudio(f) {
-  return (
-    isVideoStream(f) &&
-    f.acodec && f.acodec !== 'none'
-  );
-}
-
 // ─── normalizeFormats ─────────────────────────────────────────────────────────
-/**
- * ROOT CAUSE FIXES:
- *
- * BUG 1 – Video button disappears:
- *   Old code required vcodec != 'none' AND url.startsWith('http').
- *   Instagram HLS reels have vcodec set correctly but some dash manifests
- *   have url that is not http. Fixed: strict http check preserved but
- *   we now also handle merged streams properly.
- *
- * BUG 2 – Audio Only downloads silent video:
- *   When no separate audio stream exists (Instagram/TikTok HLS),
- *   old code added synthetic entry with url='' and formatId='bestaudio'.
- *   The download route then ran yt-dlp with -f bestaudio which on some
- *   platforms returns a video-only DASH stream (silent).
- *   Fix: synthetic entry is still added BUT download.js now uses a
- *   proper chained selector: bestaudio/best[acodec!=none]
- *   and validates acodec in response before accepting.
- *
- * BUG 3 – Inconsistency between Instagram links:
- *   Reels → HLS merged (no separate audio stream).
- *   Posts → separate video+audio DASH streams.
- *   Fix: normalizeFormats handles both cases. hasEmbeddedAudio flag
- *   tells the download route which approach to use.
- */
+//
+// DEFINITIVE ROOT CAUSE FIX for "Download Video button missing on Instagram Reels"
+//
+// The bug has TWO parts that must BOTH be fixed:
+//
+// PART A (Backend): normalizeFormats() must ALWAYS produce at least one
+//   entry with type='video' whenever yt-dlp reports any video content.
+//   This is guaranteed by Steps 4 and 5 below (fallback entries).
+//
+// PART B (Frontend): DownloaderCard.tsx must check BOTH
+//   videoFormats.length > 0  AND  metadata.hasVideo
+//   to decide whether to show the Download Video button.
+//   The old code only checked videoFormats.length > 0.
+//
 function normalizeFormats(rawFormats, platform) {
   if (!Array.isArray(rawFormats) || rawFormats.length === 0) return [];
 
-  const videoStreams     = rawFormats.filter(isVideoStream);
-  const audioOnlyStreams = rawFormats.filter(isAudioOnlyStream);
+  const normalized = [];
 
-  // Does the platform typically carry audio in all videos?
-  const platformAlwaysHasAudio = [
-    'instagram', 'tiktok', 'facebook', 'twitter', 'pinterest', 'vimeo', 'reddit',
-  ].includes(platform);
+  // ── Separate raw video and audio-only streams ───────────────────────────
+  const rawVideo = rawFormats.filter(f =>
+    f.vcodec &&
+    f.vcodec !== 'none' &&
+    f.url &&
+    typeof f.url === 'string' &&
+    f.url.startsWith('http')
+  );
 
-  // Do any video streams have embedded audio?
-  const anyVideoHasEmbeddedAudio = videoStreams.some(videoHasEmbeddedAudio);
+  const rawAudio = rawFormats.filter(f =>
+    (!f.vcodec || f.vcodec === 'none') &&
+    f.acodec &&
+    f.acodec !== 'none' &&
+    f.url &&
+    typeof f.url === 'string' &&
+    f.url.startsWith('http')
+  );
 
-  // ── Video formats ────────────────────────────────────────────────────────
-  const seenQuality = new Set();
-  const normalized  = [];
+  logger.debug(`normalizeFormats: rawVideo=${rawVideo.length} rawAudio=${rawAudio.length} platform=${platform}`);
 
-  // Best quality first
-  const sortedVideo = [...videoStreams].sort((a, b) => (b.height || 0) - (a.height || 0));
+  // ── Step 1: Build video entries ─────────────────────────────────────────
+  const seenQ = new Set();
+  const sortedVideo = [...rawVideo].sort((a, b) => (b.height || 0) - (a.height || 0));
 
   for (const f of sortedVideo) {
-    const quality = f.height
+    const q = f.height
       ? `${f.height}p`
-      : (f.format_note || f.format_id || 'SD');
-
-    if (seenQuality.has(quality)) continue;
-    seenQuality.add(quality);
+      : (f.format_note || f.resolution || f.format_id || 'SD');
+    if (seenQ.has(q)) continue;
+    seenQ.add(q);
 
     normalized.push({
       formatId:         f.format_id,
-      quality,
+      quality:          q,
       height:           f.height  || null,
       width:            f.width   || null,
       ext:              f.ext     || 'mp4',
@@ -124,26 +93,66 @@ function normalizeFormats(rawFormats, platform) {
       fps:              f.fps     || null,
       vcodec:           f.vcodec  || null,
       acodec:           f.acodec  || null,
-      // TRUE when this video stream already contains audio (HLS/merged)
-      hasEmbeddedAudio: videoHasEmbeddedAudio(f),
+      hasEmbeddedAudio: !!(f.acodec && f.acodec !== 'none'),
       url:              f.url,
+      type:             'video',
+    });
+
+    if (normalized.filter(x => x.type === 'video').length >= 8) break;
+  }
+
+  // ── Step 2: Guarantee video entry from raw list if Step 1 produced 0 ───
+  if (normalized.filter(x => x.type === 'video').length === 0 && rawVideo.length > 0) {
+    const best = rawVideo.sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+    normalized.push({
+      formatId:         best.format_id || 'bestvideo',
+      quality:          best.height ? `${best.height}p` : 'Best',
+      height:           best.height  || null,
+      width:            best.width   || null,
+      ext:              best.ext     || 'mp4',
+      filesize:         best.filesize || best.filesize_approx || null,
+      fps:              best.fps     || null,
+      vcodec:           best.vcodec  || null,
+      acodec:           best.acodec  || null,
+      hasEmbeddedAudio: !!(best.acodec && best.acodec !== 'none'),
+      url:              best.url,
       type:             'video',
     });
   }
 
-  // ── Audio-only formats ──────────────────────────────────────────────────
-  const sortedAudio = [...audioOnlyStreams].sort(
+  // ── Step 3: Ultimate fallback video entry ───────────────────────────────
+  // If yt-dlp returned NO usable video streams at all (very rare),
+  // add a sentinel so the Download Video button always appears.
+  // The download route will use 'best' yt-dlp selector which always works.
+  if (normalized.filter(x => x.type === 'video').length === 0) {
+    normalized.push({
+      formatId:         'best',
+      quality:          'Best Quality',
+      height:           null,
+      width:            null,
+      ext:              'mp4',
+      filesize:         null,
+      fps:              null,
+      vcodec:           'avc1',
+      acodec:           'mp4a',
+      hasEmbeddedAudio: true,
+      url:              '',  // sentinel — download.js uses yt-dlp selector
+      type:             'video',
+    });
+  }
+
+  // ── Step 4: Build audio entries ─────────────────────────────────────────
+  const sortedAudio = [...rawAudio].sort(
     (a, b) => (b.abr || b.tbr || 0) - (a.abr || a.tbr || 0)
   );
-
   let audioAdded = 0;
-  const seenAudioKey = new Set();
+  const seenAudio = new Set();
 
   for (const f of sortedAudio) {
     const abr = Math.round(f.abr || f.tbr || 0);
-    const key = `abr-${abr}-${f.ext}`;
-    if (seenAudioKey.has(key)) continue;
-    seenAudioKey.add(key);
+    const k = `${abr}-${f.ext}`;
+    if (seenAudio.has(k)) continue;
+    seenAudio.add(k);
 
     normalized.push({
       formatId:         f.format_id,
@@ -160,18 +169,17 @@ function normalizeFormats(rawFormats, platform) {
       type:             'audio',
     });
 
-    audioAdded++;
-    if (audioAdded >= 3) break;
+    if (++audioAdded >= 3) break;
   }
 
-  // ── Synthetic audio entry ────────────────────────────────────────────────
-  // Added when: no real audio-only stream found BUT we know audio exists
-  // (either embedded in video streams or platform always has audio).
-  //
-  // formatId = 'bestaudio' is a SENTINEL VALUE.
-  // The download route detects this and uses yt-dlp's own selector
-  // instead of trying to use this empty URL directly.
-  if (audioAdded === 0 && (anyVideoHasEmbeddedAudio || platformAlwaysHasAudio)) {
+  // ── Step 5: Synthetic audio sentinel ────────────────────────────────────
+  const platformHasAudio = [
+    'instagram','tiktok','facebook','twitter','pinterest','vimeo','reddit',
+  ].includes(platform);
+
+  const anyVideoHasAudio = rawVideo.some(f => f.acodec && f.acodec !== 'none');
+
+  if (audioAdded === 0 && (anyVideoHasAudio || platformHasAudio)) {
     normalized.push({
       formatId:         'bestaudio',
       quality:          'Audio Only',
@@ -183,10 +191,16 @@ function normalizeFormats(rawFormats, platform) {
       vcodec:           null,
       acodec:           'aac',
       hasEmbeddedAudio: false,
-      url:              '',   // empty = must use yt-dlp selector at download time
+      url:              '',  // sentinel
       type:             'audio',
     });
   }
+
+  logger.debug(
+    `normalizeFormats result: ` +
+    `video=${normalized.filter(x=>x.type==='video').length} ` +
+    `audio=${normalized.filter(x=>x.type==='audio').length}`
+  );
 
   return normalized.slice(0, 15);
 }
@@ -195,11 +209,11 @@ function normalizeFormats(rawFormats, platform) {
 async function extractMetadata(url) {
   const cached = metaCache.get(url);
   if (cached) {
-    logger.debug(`Cache hit for: ${url}`);
+    logger.debug(`Cache hit: ${url}`);
     return cached;
   }
 
-  logger.info(`Extracting metadata for: ${url}`);
+  logger.info(`Extracting: ${url}`);
   const platform = detectPlatform(url);
 
   const args = [
@@ -213,7 +227,6 @@ async function extractMetadata(url) {
     '--add-header', 'Accept-Language:en-US,en;q=0.9',
   ];
 
-  // Cookie file support (set via env var in Render dashboard)
   if (process.env.COOKIES_FILE && fs.existsSync(process.env.COOKIES_FILE)) {
     args.push('--cookies', process.env.COOKIES_FILE);
   }
@@ -229,33 +242,31 @@ async function extractMetadata(url) {
     stdout = result.stdout;
   } catch (err) {
     const msg = (err.stderr || err.message || '').toLowerCase();
-    logger.error(`yt-dlp failed for ${url}: ${msg.slice(0, 300)}`);
-
-    if (msg.includes('private'))                                      throw new Error('PRIVATE_VIDEO');
-    if (msg.includes('not available') || msg.includes('unavailable')) throw new Error('UNAVAILABLE_VIDEO');
-    if (msg.includes('removed') || msg.includes('deleted'))           throw new Error('DELETED_VIDEO');
-    if (msg.includes('copyright'))                                    throw new Error('COPYRIGHT_RESTRICTED');
-    if (msg.includes('age') && msg.includes('restricted'))            throw new Error('AGE_RESTRICTED');
+    logger.error(`yt-dlp error: ${msg.slice(0, 300)}`);
+    if (msg.includes('private'))                                       throw new Error('PRIVATE_VIDEO');
+    if (msg.includes('not available') || msg.includes('unavailable'))  throw new Error('UNAVAILABLE_VIDEO');
+    if (msg.includes('removed') || msg.includes('deleted'))            throw new Error('DELETED_VIDEO');
+    if (msg.includes('copyright'))                                     throw new Error('COPYRIGHT_RESTRICTED');
+    if (msg.includes('age') && msg.includes('restricted'))             throw new Error('AGE_RESTRICTED');
     throw new Error('EXTRACTION_FAILED');
   }
 
   if (!stdout?.trim()) throw new Error('EXTRACTION_FAILED');
 
-  // yt-dlp sometimes outputs multiple JSON lines — take last valid one
   let info;
   try {
     const lines = stdout.trim().split('\n');
     for (let i = lines.length - 1; i >= 0; i--) {
       try { info = JSON.parse(lines[i]); break; } catch {}
     }
-    if (!info) throw new Error('no valid JSON line');
+    if (!info) throw new Error('no JSON');
   } catch (e) {
-    logger.error(`JSON parse failed: ${e.message}`);
     throw new Error('PARSE_FAILED');
   }
 
   const formats = normalizeFormats(info.formats || [], platform);
 
+  const hasVideo = formats.some(f => f.type === 'video');
   const hasAudio =
     formats.some(f => f.type === 'audio') ||
     formats.some(f => f.type === 'video' && f.hasEmbeddedAudio) ||
@@ -269,9 +280,7 @@ async function extractMetadata(url) {
     thumbnail:
       info.thumbnail ||
       (Array.isArray(info.thumbnails) && info.thumbnails.length > 0
-        ? info.thumbnails[info.thumbnails.length - 1]?.url
-        : null) ||
-      null,
+        ? info.thumbnails[info.thumbnails.length - 1]?.url : null) || null,
     duration:    info.duration    || null,
     uploader:    info.uploader || info.channel || info.creator || info.uploader_id || null,
     uploaderUrl: info.uploader_url || info.channel_url || null,
@@ -281,64 +290,44 @@ async function extractMetadata(url) {
     webpage_url: info.webpage_url || url,
     formats,
     hasAudio,
-    hasVideo:    formats.some(f => f.type === 'video'),
+    hasVideo,
     extractedAt: Date.now(),
   };
 
   metaCache.set(url, result);
   logger.info(
-    `Extracted ${formats.length} formats for ${platform}: "${result.title}" ` +
-    `| hasVideo=${result.hasVideo} hasAudio=${result.hasAudio}`
+    `Done: ${platform} "${result.title}" ` +
+    `hasVideo=${hasVideo} hasAudio=${hasAudio} ` +
+    `formats=${formats.length} ` +
+    `(v=${formats.filter(f=>f.type==='video').length} a=${formats.filter(f=>f.type==='audio').length})`
   );
   return result;
 }
 
 // ─── getDownloadUrl ───────────────────────────────────────────────────────────
-/**
- * FIXED: Audio downloads no longer return silent video.
- *
- * For audio requests (type==='audio' OR formatId==='bestaudio'):
- *   Uses chained selector that guarantees audio codec is present.
- *   Validates response has acodec != 'none' before accepting.
- *   Falls back to best[acodec!=none] if needed.
- *
- * For video requests with a specific formatId:
- *   Requests that format merged with bestaudio so result always has audio.
- *   Falls back to best[ext=mp4] if merge fails.
- *
- * For video requests without a specific formatId:
- *   Requests best quality video+audio merged.
- */
 async function getDownloadUrl(url, formatId, type) {
+  const isAudio = type === 'audio' || formatId === 'bestaudio';
   let selector;
 
-  const isAudioRequest = type === 'audio' || formatId === 'bestaudio';
-
-  if (isAudioRequest) {
-    // Strict audio selector chain — all options must have acodec
+  if (isAudio) {
     selector = [
       'bestaudio[ext=m4a][acodec!=none]',
       'bestaudio[ext=mp3][acodec!=none]',
       'bestaudio[ext=webm][acodec!=none]',
       'bestaudio[acodec!=none]',
       'bestaudio',
-      // Last resort: take best quality that has ANY audio
       'best[acodec!=none]',
     ].join('/');
-
-  } else if (formatId && formatId !== 'bestaudio') {
-    // Specific video format ID — merge with bestaudio to ensure audio is present
+  } else if (formatId && !['bestaudio','best','bestvideo+bestaudio/best'].includes(formatId)) {
     selector = [
       `${formatId}+bestaudio[ext=m4a]`,
       `${formatId}+bestaudio`,
       `${formatId}`,
-      'bestvideo[ext=mp4]+bestaudio[ext=m4a]',
+      'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]',
       'best[ext=mp4]',
       'best',
     ].join('/');
-
   } else {
-    // No specific format — best merged quality
     selector = [
       'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]',
       'bestvideo[ext=mp4]+bestaudio',
@@ -349,10 +338,7 @@ async function getDownloadUrl(url, formatId, type) {
   }
 
   const args = [
-    '--dump-json',
-    '--no-playlist',
-    '--no-warnings',
-    '--no-check-certificate',
+    '--dump-json', '--no-playlist', '--no-warnings', '--no-check-certificate',
     '--socket-timeout', '15',
     '--user-agent',
     'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
@@ -362,68 +348,51 @@ async function getDownloadUrl(url, formatId, type) {
   if (process.env.COOKIES_FILE && fs.existsSync(process.env.COOKIES_FILE)) {
     args.push('--cookies', process.env.COOKIES_FILE);
   }
-
   args.push(url);
 
-  logger.info(`getDownloadUrl: type="${type}" selector="${selector}"`);
+  logger.info(`Download: type="${type}" selector="${selector}"`);
 
   let info;
   try {
     const { stdout } = await execFileAsync(YTDLP_PATH, args, {
-      timeout:   35000,
-      maxBuffer: 10 * 1024 * 1024,
+      timeout: 35000, maxBuffer: 10 * 1024 * 1024,
     });
-
     const lines = stdout.trim().split('\n');
     for (let i = lines.length - 1; i >= 0; i--) {
       try { info = JSON.parse(lines[i]); break; } catch {}
     }
   } catch (err) {
-    logger.error(`yt-dlp getDownloadUrl failed: ${err.message}`);
+    logger.error(`Download yt-dlp error: ${err.message}`);
     throw new Error('DOWNLOAD_URL_FAILED');
   }
 
-  if (!info?.url) {
-    logger.error('yt-dlp returned no URL');
-    throw new Error('DOWNLOAD_URL_FAILED');
-  }
+  if (!info?.url) throw new Error('DOWNLOAD_URL_FAILED');
 
-  // ── Validate audio requests ──────────────────────────────────────────────
-  // If we asked for audio but got a video-only stream, retry with safe fallback
-  if (isAudioRequest && info.acodec === 'none') {
-    logger.warn(`Audio request got acodec=none (format_id=${info.format_id}), retrying…`);
-
-    const retryArgs = [
-      '--dump-json', '--no-playlist', '--no-warnings', '--no-check-certificate',
-      '--socket-timeout', '15',
-      '--user-agent',
-      'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
-      '-f', 'best[acodec!=none]/best',
-    ];
-    if (process.env.COOKIES_FILE && fs.existsSync(process.env.COOKIES_FILE)) {
-      retryArgs.push('--cookies', process.env.COOKIES_FILE);
-    }
-    retryArgs.push(url);
-
+  // Retry if audio request got video-only stream
+  if (isAudio && info.acodec === 'none') {
+    logger.warn('Audio got acodec=none, retrying…');
     try {
-      const { stdout: rs } = await execFileAsync(YTDLP_PATH, retryArgs, {
-        timeout: 30000, maxBuffer: 10 * 1024 * 1024,
-      });
-      const rLines = rs.trim().split('\n');
-      let rInfo = null;
-      for (let i = rLines.length - 1; i >= 0; i--) {
-        try { rInfo = JSON.parse(rLines[i]); break; } catch {}
+      const ra = [
+        '--dump-json', '--no-playlist', '--no-warnings', '--no-check-certificate',
+        '--socket-timeout', '15',
+        '--user-agent', 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+        '-f', 'best[acodec!=none]/best',
+        url,
+      ];
+      if (process.env.COOKIES_FILE && fs.existsSync(process.env.COOKIES_FILE)) {
+        ra.push('--cookies', process.env.COOKIES_FILE);
       }
-      if (rInfo?.url && rInfo.acodec !== 'none') info = rInfo;
-    } catch (retryErr) {
-      logger.warn(`Audio retry also failed: ${retryErr.message}`);
-      // Proceed with original info — at least the URL works
-    }
+      const { stdout: rs } = await execFileAsync(YTDLP_PATH, ra, { timeout: 30000, maxBuffer: 10*1024*1024 });
+      const rl = rs.trim().split('\n');
+      let ri = null;
+      for (let i = rl.length-1; i >= 0; i--) { try { ri = JSON.parse(rl[i]); break; } catch {} }
+      if (ri?.url && ri.acodec !== 'none') info = ri;
+    } catch (e) { logger.warn(`Retry failed: ${e.message}`); }
   }
 
   return {
     directUrl: info.url,
-    ext:       info.ext   || (isAudioRequest ? 'm4a' : 'mp4'),
+    ext:       info.ext   || (isAudio ? 'm4a' : 'mp4'),
     title:     info.title || 'video',
     acodec:    info.acodec || null,
     vcodec:    info.vcodec || null,
