@@ -16,16 +16,14 @@ import {
 type DownloadState = 'idle' | 'fetching' | 'ready' | 'error';
 
 export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: string }) {
-  const [url, setUrl]                   = useState(defaultUrl);
-  const [state, setState]               = useState<DownloadState>('idle');
-  const [metadata, setMetadata]         = useState<MediaMetadata | null>(null);
+  const [url, setUrl] = useState(defaultUrl);
+  const [state, setState] = useState<DownloadState>('idle');
+  const [metadata, setMetadata] = useState<MediaMetadata | null>(null);
   const [selectedFormat, setSelectedFormat] = useState<MediaFormat | null>(null);
-  const [errorMsg, setErrorMsg]         = useState('');
-  const [activeDownload, setActiveDownload] =
-    useState<'video' | 'audio' | 'thumbnail' | null>(null);
+  const [errorMsg, setErrorMsg] = useState('');
+  const [activeDownload, setActiveDownload] = useState<'video' | 'audio' | 'thumbnail' | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // ── Reset ────────────────────────────────────────────────────────────────
   function reset() {
     setMetadata(null);
     setSelectedFormat(null);
@@ -36,7 +34,6 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
     setTimeout(() => inputRef.current?.focus(), 100);
   }
 
-  // ── Fetch metadata ───────────────────────────────────────────────────────
   async function handleFetch(e: React.FormEvent) {
     e.preventDefault();
     const trimmed = url.trim();
@@ -58,9 +55,8 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
     const data = result.data;
     setMetadata(data);
 
-    // Default: pick the best combined video format ≤1080p
     const defaultFmt =
-      data.formats.find(f => f.type === 'video' && f.height !== null && f.height <= 1080) ||
+      data.formats.find(f => f.type === 'video' && f.height !== null && (f.height as number) <= 1080) ||
       data.formats.find(f => f.type === 'video') ||
       null;
     setSelectedFormat(defaultFmt);
@@ -68,29 +64,25 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
     logEvent('fetch_success', data.platform, { title: data.title });
   }
 
-  // ── Trigger real browser download ────────────────────────────────────────
-  // Uses fetch→blob so the file appears in Chrome's download bar,
-  // never opens a new tab.
   async function triggerBrowserDownload(directUrl: string, filename: string) {
     try {
       const resp = await fetch(directUrl);
-      if (!resp.ok) throw new Error('fetch response not ok');
-      const blob    = await resp.blob();
+      if (!resp.ok) throw new Error('response not ok');
+      const blob = await resp.blob();
       const blobUrl = URL.createObjectURL(blob);
-      const a       = document.createElement('a');
-      a.href        = blobUrl;
-      a.download    = filename;
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = filename;
       a.style.display = 'none';
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(blobUrl), 30000);
     } catch {
-      // Fallback: anchor with _self prevents new tab
-      const a    = document.createElement('a');
-      a.href     = directUrl;
+      const a = document.createElement('a');
+      a.href = directUrl;
       a.download = filename;
-      a.target   = '_self';
+      a.target = '_self';
       a.style.display = 'none';
       document.body.appendChild(a);
       a.click();
@@ -98,19 +90,12 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
     }
   }
 
-  // ── Handle download button click ─────────────────────────────────────────
   async function handleDownload(type: 'video' | 'audio' | 'thumbnail') {
     if (!metadata || activeDownload !== null) return;
     setActiveDownload(type);
 
     try {
-      // For video we send the selected formatId.
-      // The backend IGNORES it and always uses a combined-stream selector,
-      // so we can never accidentally download a muted video-only stream.
-      // Sending it anyway lets the backend log which quality the user chose.
-      const formatId =
-        type === 'video' ? (selectedFormat?.formatId || undefined) : undefined;
-
+      const formatId = type === 'video' ? (selectedFormat?.formatId || undefined) : undefined;
       const result = await requestDownload(metadata.webpage_url, formatId, type);
 
       if (!result.success || !result.directUrl) {
@@ -118,13 +103,16 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
         return;
       }
 
-      const ext      = result.ext || (type === 'audio' ? 'm4a' : type === 'thumbnail' ? 'jpg' : 'mp4');
+      const ext = result.ext || (type === 'audio' ? 'm4a' : type === 'thumbnail' ? 'jpg' : 'mp4');
       const filename = result.filename || `fetchclip-${type}.${ext}`;
 
       await triggerBrowserDownload(result.directUrl, filename);
-      toast.success(`${type === 'audio' ? 'Audio' : type === 'thumbnail' ? 'Thumbnail' : 'Video'} is downloading!`);
+      toast.success(
+        type === 'audio' ? 'Audio is downloading!' :
+        type === 'thumbnail' ? 'Thumbnail is downloading!' :
+        'Video is downloading!'
+      );
       logEvent('download_success', metadata.platform, { type, quality: selectedFormat?.quality });
-
     } catch {
       toast.error('Download failed. Please try again.');
     } finally {
@@ -132,18 +120,21 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
     }
   }
 
-  // Only show video formats that have audio (combined streams).
-  // Video-only DASH streams are filtered out by normalizeFormats on the backend.
+  // Show video formats — all formats with vcodec (including video-only DASH)
+  // Audio is guaranteed by the backend selector at download time
   const videoFormats = metadata?.formats.filter(f => f.type === 'video') ?? [];
 
-  // Audio button: always shown whenever media is loaded.
-  // The backend handles platforms with no audio-only streams gracefully.
+  // Always show audio button when media is loaded
   const showAudioButton = metadata !== null;
+
+  // Always show download video button when media is loaded
+  // Even if videoFormats is empty (edge case), show the button
+  const showVideoButton = metadata !== null;
 
   return (
     <div className="w-full max-w-3xl mx-auto">
 
-      {/* ── URL input ───────────────────────────────────────────────────── */}
+      {/* URL Input */}
       <div className="glass-card p-2 shadow-xl shadow-gray-200/50 dark:shadow-gray-900/50">
         <form onSubmit={handleFetch} className="flex gap-2">
           <input
@@ -180,7 +171,7 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
         </form>
       </div>
 
-      {/* ── Error ───────────────────────────────────────────────────────── */}
+      {/* Error */}
       {state === 'error' && (
         <div className="mt-4 p-4 rounded-xl bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 flex items-start gap-3">
           <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
@@ -191,7 +182,7 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
         </div>
       )}
 
-      {/* ── Loading skeleton ─────────────────────────────────────────────── */}
+      {/* Loading skeleton */}
       {state === 'fetching' && (
         <div className="mt-6 glass-card p-6 animate-pulse">
           <div className="flex gap-4">
@@ -205,14 +196,12 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
         </div>
       )}
 
-      {/* ── Ready ───────────────────────────────────────────────────────── */}
+      {/* Ready */}
       {state === 'ready' && metadata && (
         <div className="mt-6 glass-card overflow-hidden animate-slide-up shadow-xl shadow-gray-200/50 dark:shadow-gray-900/50">
 
-          {/* Media info header */}
+          {/* Media info */}
           <div className="p-6 flex flex-col sm:flex-row gap-5">
-
-            {/* Thumbnail — plain <img> avoids Next.js domain restrictions */}
             {metadata.thumbnail ? (
               <div className="relative flex-shrink-0 w-full sm:w-48 aspect-video rounded-xl overflow-hidden bg-gray-100 dark:bg-gray-800 group">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -221,9 +210,7 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
                   alt={metadata.title}
                   className="w-full h-full object-cover"
                   referrerPolicy="no-referrer"
-                  onError={e => {
-                    (e.currentTarget as HTMLImageElement).style.display = 'none';
-                  }}
+                  onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
                 />
                 {metadata.duration && (
                   <div className="absolute bottom-2 right-2 bg-black/80 text-white text-xs px-2 py-0.5 rounded-md font-mono">
@@ -251,25 +238,19 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
               </h2>
               <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
                 {metadata.uploader && (
-                  <span className="flex items-center gap-1">
-                    <User className="w-3 h-3" />{metadata.uploader}
-                  </span>
+                  <span className="flex items-center gap-1"><User className="w-3 h-3" />{metadata.uploader}</span>
                 )}
                 {metadata.duration && (
-                  <span className="flex items-center gap-1">
-                    <Clock className="w-3 h-3" />{formatDuration(metadata.duration)}
-                  </span>
+                  <span className="flex items-center gap-1"><Clock className="w-3 h-3" />{formatDuration(metadata.duration)}</span>
                 )}
                 {metadata.viewCount && (
-                  <span className="flex items-center gap-1">
-                    <Eye className="w-3 h-3" />{metadata.viewCount.toLocaleString()} views
-                  </span>
+                  <span className="flex items-center gap-1"><Eye className="w-3 h-3" />{metadata.viewCount.toLocaleString()} views</span>
                 )}
               </div>
             </div>
           </div>
 
-          {/* Format selector + download buttons */}
+          {/* Format selector + buttons */}
           <div className="px-6 pb-6 space-y-4 border-t border-gray-100 dark:border-gray-800 pt-5">
 
             {videoFormats.length > 0 && (
@@ -290,9 +271,9 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
                     {videoFormats.map(f => (
                       <option key={f.formatId} value={f.formatId}>
                         {f.quality}
-                        {f.ext      ? ` · ${f.ext.toUpperCase()}`          : ''}
-                        {f.filesize ? ` · ${formatFileSize(f.filesize)}`   : ''}
-                        {f.fps && f.fps > 30 ? ` · ${f.fps}fps`           : ''}
+                        {f.ext ? ` · ${f.ext.toUpperCase()}` : ''}
+                        {f.filesize ? ` · ${formatFileSize(f.filesize)}` : ''}
+                        {f.fps && f.fps > 30 ? ` · ${f.fps}fps` : ''}
                       </option>
                     ))}
                   </select>
@@ -303,8 +284,8 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
 
             <div className="flex flex-wrap gap-3">
 
-              {/* Download Video — always has audio (combined stream) */}
-              {videoFormats.length > 0 && (
+              {/* Download Video — shown whenever media loaded */}
+              {showVideoButton && (
                 <button
                   onClick={() => handleDownload('video')}
                   disabled={activeDownload !== null}
@@ -318,7 +299,7 @@ export default function DownloaderCard({ defaultUrl = '' }: { defaultUrl?: strin
                 </button>
               )}
 
-              {/* Audio Only — always shown when media is loaded */}
+              {/* Audio Only — shown whenever media loaded */}
               {showAudioButton && (
                 <button
                   onClick={() => handleDownload('audio')}

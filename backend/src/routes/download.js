@@ -21,8 +21,8 @@ router.post('/', async (req, res, next) => {
   } catch (err) {
     return res.status(400).json({
       success: false,
-      error:   err.errors?.[0]?.message || 'Invalid request',
-      code:    'VALIDATION_ERROR',
+      error: err.errors?.[0]?.message || 'Invalid request',
+      code: 'VALIDATION_ERROR',
     });
   }
 
@@ -30,8 +30,8 @@ router.post('/', async (req, res, next) => {
   if (!cleanUrl || !isSupportedUrl(cleanUrl)) {
     return res.status(400).json({
       success: false,
-      error:   'Invalid or unsupported URL',
-      code:    'INVALID_URL',
+      error: 'Invalid or unsupported URL',
+      code: 'INVALID_URL',
     });
   }
 
@@ -39,122 +39,70 @@ router.post('/', async (req, res, next) => {
 
   try {
 
-    // ── THUMBNAIL ────────────────────────────────────────────────────────────
+    // ── THUMBNAIL ─────────────────────────────────────────────────────────
     if (parsed.type === 'thumbnail') {
       const { extractMetadata } = require('../services/ytdlpService');
       const meta = await extractMetadata(cleanUrl);
       if (!meta.thumbnail) {
-        return res.status(404).json({
-          success: false,
-          error:   'No thumbnail available',
-          code:    'NO_THUMBNAIL',
-        });
+        return res.status(404).json({ success: false, error: 'No thumbnail available', code: 'NO_THUMBNAIL' });
       }
-      logDownload({
-        url: cleanUrl, platform, title: meta.title,
-        type: 'thumbnail', ip, success: true,
-      }).catch(() => {});
+      logDownload({ url: cleanUrl, platform, title: meta.title, type: 'thumbnail', ip, success: true }).catch(() => {});
       return res.json({
-        success:   true,
+        success: true,
         directUrl: meta.thumbnail,
-        filename:  `thumbnail-${Date.now()}.jpg`,
-        ext:       'jpg',
-        type:      'thumbnail',
+        filename: `thumbnail-${Date.now()}.jpg`,
+        ext: 'jpg',
+        type: 'thumbnail',
       });
     }
 
-    // ── AUDIO ONLY ───────────────────────────────────────────────────────────
-    // FIX: Use the new extractAudioUrl() which has two-stage fallback:
-    //   Stage 1 → bestaudio (works for YouTube/Facebook/Vimeo)
-    //   Stage 2 → best combined stream (works for Instagram/TikTok/Twitter)
-    // This eliminates the "Unable to extract" error on platforms that have
-    // no separate audio-only streams.
+    // ── AUDIO ONLY ────────────────────────────────────────────────────────
     if (parsed.type === 'audio') {
-      logger.info(`Audio download requested for ${platform}: ${cleanUrl}`);
-
+      logger.info(`Audio download: ${platform} — ${cleanUrl}`);
       const { directUrl, ext, title } = await extractAudioUrl(cleanUrl);
 
       const safeTitle = (title || 'audio')
-        .replace(/[^a-zA-Z0-9\s\-_]/g, '')
-        .slice(0, 80)
-        .trim() || 'fetchclip-audio';
+        .replace(/[^a-zA-Z0-9\s\-_]/g, '').slice(0, 80).trim() || 'fetchclip-audio';
 
-      logDownload({
-        url: cleanUrl, platform, title,
-        type: 'audio', ip,
-        userAgent: req.headers['user-agent'],
-        success: true,
-      }).catch(() => {});
+      logDownload({ url: cleanUrl, platform, title, type: 'audio', ip, userAgent: req.headers['user-agent'], success: true }).catch(() => {});
 
       return res.json({
-        success:   true,
+        success: true,
         directUrl,
-        filename:  `${safeTitle}.${ext || 'm4a'}`,
-        ext:       ext || 'm4a',
-        type:      'audio',
+        filename: `${safeTitle}.${ext || 'm4a'}`,
+        ext: ext || 'm4a',
+        type: 'audio',
       });
     }
 
-    // ── VIDEO (with audio) ───────────────────────────────────────────────────
-    // FIX: The selector REQUIRES acodec!=none so we NEVER get a silent video.
-    //
-    // Priority order:
-    //   1. Best combined MP4 ≤1080p with both video AND audio codecs
-    //   2. Best combined MP4 (any height) with both codecs
-    //   3. Best combined stream (any container) with both codecs ≤1080p
-    //   4. Best combined stream (any container) with both codecs
-    //   5. Best MP4 (last resort, should still have audio on social platforms)
-    //   6. Absolute best (final fallback)
-    //
-    // NOTE: We intentionally do NOT pass the formatId from the frontend here.
-    // The frontend shows combined-format IDs in the quality selector, but to
-    // be safe we always use the selector string rather than trusting the ID.
-    // This guarantees acodec!=none on the server side regardless of what the
-    // frontend sends.
-
-    const videoSelector =
-      'best[ext=mp4][vcodec!=none][acodec!=none][height<=1080]' +
-      '/best[ext=mp4][vcodec!=none][acodec!=none]' +
-      '/best[vcodec!=none][acodec!=none][height<=1080]' +
-      '/best[vcodec!=none][acodec!=none]' +
-      '/best[ext=mp4]' +
-      '/best';
-
-    logger.info(`Video download requested for ${platform}: ${cleanUrl}`);
-
-    const { directUrl, ext, title } = await getDownloadUrl(cleanUrl, videoSelector);
+    // ── VIDEO (always with audio) ─────────────────────────────────────────
+    // getDownloadUrl() ignores the formatId and uses a safe combined-stream
+    // selector that guarantees acodec != none. No more silent downloads.
+    logger.info(`Video download: ${platform} — ${cleanUrl}`);
+    const { directUrl, ext, title } = await getDownloadUrl(cleanUrl, parsed.formatId);
 
     if (!directUrl) throw new Error('DOWNLOAD_URL_FAILED');
 
     const safeTitle = (title || 'video')
-      .replace(/[^a-zA-Z0-9\s\-_]/g, '')
-      .slice(0, 80)
-      .trim() || 'fetchclip';
+      .replace(/[^a-zA-Z0-9\s\-_]/g, '').slice(0, 80).trim() || 'fetchclip';
 
     logDownload({
       url: cleanUrl, platform, title,
       quality: 'best-combined-av',
-      type: 'video', ip,
-      userAgent: req.headers['user-agent'],
-      success: true,
+      type: 'video', ip, userAgent: req.headers['user-agent'], success: true,
     }).catch(() => {});
 
-    logger.info(`Video+Audio URL ready for ${platform}: ${safeTitle}`);
-
     return res.json({
-      success:   true,
+      success: true,
       directUrl,
-      filename:  `${safeTitle}.${ext || 'mp4'}`,
-      ext:       ext || 'mp4',
-      type:      'video',
+      filename: `${safeTitle}.${ext || 'mp4'}`,
+      ext: ext || 'mp4',
+      type: 'video',
     });
 
   } catch (err) {
     logger.error(`Download error [${platform}]: ${err.message}`);
-    logDownload({
-      url: cleanUrl, platform,
-      success: false, error: err.message, ip,
-    }).catch(() => {});
+    logDownload({ url: cleanUrl, platform, success: false, error: err.message, ip }).catch(() => {});
     return next(err);
   }
 });

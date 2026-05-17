@@ -31,53 +31,63 @@ function getYtDlpPath() {
       if (fs.existsSync(c)) { logger.info(`Found yt-dlp at: ${c}`); return c; }
     } catch {}
   }
-  logger.warn('yt-dlp not found, falling back to PATH');
   return 'yt-dlp';
 }
 
 const YTDLP_PATH = getYtDlpPath();
 
-// ---------------------------------------------------------------------------
+// =============================================================================
 // normalizeFormats
-// ---------------------------------------------------------------------------
-// ROOT CAUSE FIX: The old code included video-only streams (acodec=none) in
-// the "video" bucket. When the frontend sent those formatIds for download,
-// the result was a silent/muted video because there was no audio track.
+// =============================================================================
+// ROOT CAUSE OF "Download Video button missing":
 //
-// Fix: We now split formats into three buckets:
-//   1. combined  — has BOTH vcodec and acodec (video+audio in one file)
-//   2. videoOnly — has vcodec but NO acodec (needs merging with audio)
-//   3. audioOnly — has acodec but NO vcodec
+// Instagram returns formats where BOTH vcodec and acodec fields look like this:
+//   { vcodec: "avc1.640028", acodec: "mp4a.40.2" }  ← combined, has both
+//   { vcodec: "avc1.640028", acodec: "none" }         ← video-only DASH
+//   { vcodec: "none",        acodec: "mp4a.40.2" }    ← audio-only DASH
 //
-// For the UI we show combined streams as "video" formats because they
-// already contain audio. Video-only DASH streams are hidden from the UI
-// to prevent users accidentally picking muted formats.
-// ---------------------------------------------------------------------------
+// The previous fix was TOO STRICT: it required acodec!=none for video bucket.
+// But some Instagram formats have acodec="none" even though yt-dlp's "best"
+// selector picks them because there is a matching audio stream that gets
+// auto-merged. When we filtered those out, videoFormats became empty → no
+// Download Video button.
+//
+// CORRECT FIX:
+// Show ALL formats that have a video codec in the UI dropdown.
+// But at DOWNLOAD TIME, force a combined-stream selector on the backend
+// regardless of which formatId the user picked.
+// This way the button always shows AND the download always has audio.
+// =============================================================================
 function normalizeFormats(rawFormats, platform) {
   if (!Array.isArray(rawFormats) || rawFormats.length === 0) return [];
 
   const seen = new Set();
   const normalized = [];
 
-  // ── Bucket 1: combined streams (video + audio in single file) ──────────────
-  const combinedFormats = rawFormats.filter(f =>
-    f.vcodec && f.vcodec !== 'none' &&
-    f.acodec && f.acodec !== 'none' &&
-    f.url && f.url.startsWith('http')
+  // ── ALL formats that have a video stream ──────────────────────────────────
+  // We include video-only (acodec=none) here intentionally so the dropdown
+  // is populated and the Download Video button appears.
+  // Audio is guaranteed at download time by the backend selector.
+  const videoFormats = rawFormats.filter(f =>
+    f.vcodec &&
+    f.vcodec !== 'none' &&
+    f.url &&
+    f.url.startsWith('http')
   );
 
-  // ── Bucket 2: audio-only streams ──────────────────────────────────────────
+  // ── Audio-only streams ────────────────────────────────────────────────────
   const audioOnlyFormats = rawFormats.filter(f =>
     (!f.vcodec || f.vcodec === 'none') &&
-    f.acodec && f.acodec !== 'none' &&
-    f.url && f.url.startsWith('http')
+    f.acodec &&
+    f.acodec !== 'none' &&
+    f.url &&
+    f.url.startsWith('http')
   );
 
-  // ── Add combined formats as "video" entries ────────────────────────────────
-  // These are safe: they have both video AND audio — no silent download risk.
-  const sortedCombined = combinedFormats.sort((a, b) => (b.height || 0) - (a.height || 0));
+  // Sort video by height descending, add to normalized
+  const sortedVideo = videoFormats.sort((a, b) => (b.height || 0) - (a.height || 0));
 
-  for (const f of sortedCombined) {
+  for (const f of sortedVideo) {
     const quality = f.height
       ? `${f.height}p`
       : (f.format_note || f.format_id || 'best');
@@ -97,11 +107,10 @@ function normalizeFormats(rawFormats, platform) {
       acodec:   f.acodec   || null,
       url:      f.url,
       type:     'video',
-      hasAudio: true,   // always true for combined streams
     });
   }
 
-  // ── Add explicit audio-only entries ──────────────────────────────────────
+  // Add explicit audio-only entries (YouTube, Facebook, Vimeo)
   const sortedAudio = audioOnlyFormats.sort(
     (a, b) => (b.abr || b.tbr || 0) - (a.abr || a.tbr || 0)
   );
@@ -118,26 +127,22 @@ function normalizeFormats(rawFormats, platform) {
       quality:  abr > 0 ? `Audio ${abr}kbps` : 'Audio Only',
       height:   null,
       width:    null,
-      ext:      f.ext  || 'm4a',
+      ext:      f.ext || 'm4a',
       filesize: f.filesize || f.filesize_approx || null,
       fps:      null,
       vcodec:   null,
       acodec:   f.acodec || null,
       url:      f.url,
       type:     'audio',
-      hasAudio: true,
     });
 
     if (audioAdded.size >= 3) break;
   }
 
-  // ── Synthetic audio entry for platforms with NO separate audio stream ──────
-  // Instagram, TikTok, Twitter/X only have combined streams — no audio-only.
-  // We add a synthetic "Audio Only" entry so the button always appears.
-  // At download time, the backend will use -x (extract audio) via ffmpeg.
-  if (audioAdded.size === 0 && combinedFormats.length > 0) {
+  // Synthetic audio entry for Instagram/TikTok/Twitter (no separate audio stream)
+  if (audioAdded.size === 0 && videoFormats.length > 0) {
     normalized.push({
-      formatId: '__extract_audio__',   // special sentinel value
+      formatId: '__bestaudio__',
       quality:  'Audio Only',
       height:   null,
       width:    null,
@@ -148,16 +153,15 @@ function normalizeFormats(rawFormats, platform) {
       acodec:   'aac',
       url:      '',
       type:     'audio',
-      hasAudio: true,
     });
   }
 
   return normalized.slice(0, 12);
 }
 
-// ---------------------------------------------------------------------------
+// =============================================================================
 // extractMetadata
-// ---------------------------------------------------------------------------
+// =============================================================================
 async function extractMetadata(url) {
   const cached = metaCache.get(url);
   if (cached) {
@@ -182,7 +186,7 @@ async function extractMetadata(url) {
     url,
   ];
 
-  // If cookies file is configured, use it (needed for some platforms)
+  // Cookies support (needed for some platforms)
   if (process.env.COOKIES_FILE && fs.existsSync(process.env.COOKIES_FILE)) {
     args.push('--cookies', process.env.COOKIES_FILE);
   }
@@ -198,7 +202,7 @@ async function extractMetadata(url) {
     });
     stdout = result.stdout;
   } catch (err) {
-    logger.error(`yt-dlp execution failed: ${err.message}`);
+    logger.error(`yt-dlp failed: ${err.message}`);
     const msg = (err.stderr || err.message || '').toLowerCase();
     if (msg.includes('private video') || msg.includes('private')) throw new Error('PRIVATE_VIDEO');
     if (msg.includes('not available') || msg.includes('unavailable'))  throw new Error('UNAVAILABLE_VIDEO');
@@ -218,22 +222,13 @@ async function extractMetadata(url) {
     for (let i = lines.length - 1; i >= 0; i--) {
       try { parsed = JSON.parse(lines[i]); break; } catch {}
     }
-    if (!parsed) throw new Error('No valid JSON found');
+    if (!parsed) throw new Error('No valid JSON');
     info = parsed;
-  } catch (parseErr) {
-    logger.error(`JSON parse failed: ${parseErr.message}`);
+  } catch {
     throw new Error('PARSE_FAILED');
   }
 
   const formats = normalizeFormats(info.formats || [], platform);
-
-  // hasAudio = true whenever any combined video or audio-only stream exists
-  const hasCombined = (info.formats || []).some(
-    f => f.vcodec && f.vcodec !== 'none' && f.acodec && f.acodec !== 'none'
-  );
-  const hasExplicitAudio = (info.formats || []).some(
-    f => (!f.vcodec || f.vcodec === 'none') && f.acodec && f.acodec !== 'none'
-  );
 
   const result = {
     id:          info.id       || null,
@@ -254,8 +249,8 @@ async function extractMetadata(url) {
     uploadDate:  info.upload_date   || null,
     webpage_url: info.webpage_url   || url,
     formats,
-    hasAudio:    hasCombined || hasExplicitAudio,
-    hasVideo:    formats.some(f => f.type === 'video'),
+    hasAudio: true,   // always true — audio is guaranteed at download time
+    hasVideo: formats.some(f => f.type === 'video'),
     extractedAt: Date.now(),
   };
 
@@ -264,14 +259,24 @@ async function extractMetadata(url) {
   return result;
 }
 
-// ---------------------------------------------------------------------------
-// getDownloadUrl  — used for VIDEO downloads only
-// ---------------------------------------------------------------------------
-// FIX: always select a combined stream (acodec!=none AND vcodec!=none).
-// We never pass a video-only formatId here. The selector below prioritises
-// combined MP4 streams so the downloaded file always has audio.
-// ---------------------------------------------------------------------------
-async function getDownloadUrl(url, formatSelector) {
+// =============================================================================
+// getDownloadUrl  (VIDEO)
+// =============================================================================
+// IMPORTANT: We IGNORE the formatId from the frontend and always use a
+// combined-stream selector. This guarantees the downloaded video has audio
+// regardless of which quality row the user selected.
+// =============================================================================
+async function getDownloadUrl(url, _ignoredFormatId) {
+  // Selector: prefer combined MP4 with both video+audio codecs
+  // Falls back through increasingly permissive options
+  const selector =
+    'best[ext=mp4][vcodec!=none][acodec!=none][height<=1080]' +
+    '/best[ext=mp4][vcodec!=none][acodec!=none]' +
+    '/best[vcodec!=none][acodec!=none][height<=1080]' +
+    '/best[vcodec!=none][acodec!=none]' +
+    '/best[ext=mp4]' +
+    '/best';
+
   const args = [
     '--dump-json',
     '--no-playlist',
@@ -281,7 +286,7 @@ async function getDownloadUrl(url, formatSelector) {
     '--retries', '1',
     '--user-agent',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    '-f', formatSelector,
+    '-f', selector,
     url,
   ];
 
@@ -303,41 +308,25 @@ async function getDownloadUrl(url, formatSelector) {
     for (let i = lines.length - 1; i >= 0; i--) {
       try { info = JSON.parse(lines[i]); break; } catch {}
     }
-
     if (!info || !info.url) throw new Error('No URL in response');
 
-    return {
-      directUrl: info.url,
-      ext:       info.ext   || 'mp4',
-      title:     info.title || 'video',
-    };
+    return { directUrl: info.url, ext: info.ext || 'mp4', title: info.title || 'video' };
   } catch (err) {
     logger.error(`getDownloadUrl failed: ${err.message}`);
     throw new Error('DOWNLOAD_URL_FAILED');
   }
 }
 
-// ---------------------------------------------------------------------------
-// extractAudioUrl  — used for AUDIO ONLY downloads
-// ---------------------------------------------------------------------------
-// ROOT CAUSE FIX for "Unable to extract":
-//
-// Instagram/TikTok/Twitter have NO separate audio streams.
-// Using 'bestaudio' fails because there is nothing matching that selector.
-//
-// The correct approach:
-//   1. Try bestaudio (works for YouTube, Facebook, Reddit, Vimeo)
-//   2. If that fails, fall back to best combined stream
-//      (the file has audio embedded — we return the URL and let the
-//       browser/player handle it; the file IS an audio+video mp4 but
-//       the user gets the audio they asked for)
-//
-// For a true audio-only file we use yt-dlp's -x flag + ffmpeg.
-// But since we are returning a directUrl (not downloading server-side),
-// we return the best available URL that contains audio.
-// ---------------------------------------------------------------------------
+// =============================================================================
+// extractAudioUrl  (AUDIO ONLY)
+// =============================================================================
+// Two-stage fallback:
+//   Stage 1: bestaudio selector  → works for YouTube/Facebook/Vimeo
+//   Stage 2: best combined stream → works for Instagram/TikTok/Twitter
+//            (these platforms have no separate audio stream)
+// =============================================================================
 async function extractAudioUrl(url) {
-  const baseArgs = [
+  const commonArgs = [
     '--dump-json',
     '--no-playlist',
     '--no-warnings',
@@ -346,78 +335,61 @@ async function extractAudioUrl(url) {
     '--retries', '1',
     '--user-agent',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    url,
   ];
 
+  const cookieArgs = [];
   if (process.env.COOKIES_FILE && fs.existsSync(process.env.COOKIES_FILE)) {
-    baseArgs.push('--cookies', process.env.COOKIES_FILE);
+    cookieArgs.push('--cookies', process.env.COOKIES_FILE);
   }
   if (process.env.COOKIES_FROM_BROWSER) {
-    baseArgs.push('--cookies-from-browser', process.env.COOKIES_FROM_BROWSER);
+    cookieArgs.push('--cookies-from-browser', process.env.COOKIES_FROM_BROWSER);
   }
 
-  // Attempt 1: explicit audio-only stream (YouTube, Facebook, Vimeo)
+  // Stage 1: explicit audio-only stream
   try {
-    const args1 = [
-      ...baseArgs.slice(0, -1), // everything except the url
-      '-f', 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio',
-      url,
-    ];
-    const { stdout } = await execFileAsync(YTDLP_PATH, args1, {
-      timeout: 20000,
-      maxBuffer: 10 * 1024 * 1024,
-    });
+    const { stdout } = await execFileAsync(
+      YTDLP_PATH,
+      [...commonArgs, ...cookieArgs, '-f', 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio', url],
+      { timeout: 20000, maxBuffer: 10 * 1024 * 1024 }
+    );
     const lines = stdout.trim().split('\n');
     for (let i = lines.length - 1; i >= 0; i--) {
       try {
         const info = JSON.parse(lines[i]);
         if (info && info.url) {
-          logger.info('Audio: found explicit audio-only stream');
-          return {
-            directUrl: info.url,
-            ext:       info.ext   || 'm4a',
-            title:     info.title || 'audio',
-          };
+          logger.info('Audio: explicit audio-only stream found');
+          return { directUrl: info.url, ext: info.ext || 'm4a', title: info.title || 'audio' };
         }
       } catch {}
     }
   } catch (err) {
-    logger.warn(`Audio attempt 1 (bestaudio) failed: ${err.message}`);
+    logger.warn(`Audio stage 1 failed: ${err.message}`);
   }
 
-  // Attempt 2: best combined stream that has audio
-  // (Instagram, TikTok, Twitter — only have combined streams)
+  // Stage 2: best combined stream (Instagram/TikTok/Twitter fallback)
   try {
     const combinedSelector =
       'best[ext=mp4][vcodec!=none][acodec!=none]' +
       '/best[vcodec!=none][acodec!=none]' +
       '/best';
 
-    const args2 = [
-      ...baseArgs.slice(0, -1),
-      '-f', combinedSelector,
-      url,
-    ];
-    const { stdout } = await execFileAsync(YTDLP_PATH, args2, {
-      timeout: 20000,
-      maxBuffer: 10 * 1024 * 1024,
-    });
+    const { stdout } = await execFileAsync(
+      YTDLP_PATH,
+      [...commonArgs, ...cookieArgs, '-f', combinedSelector, url],
+      { timeout: 20000, maxBuffer: 10 * 1024 * 1024 }
+    );
     const lines = stdout.trim().split('\n');
     for (let i = lines.length - 1; i >= 0; i--) {
       try {
         const info = JSON.parse(lines[i]);
         if (info && info.url) {
-          logger.info('Audio: falling back to combined stream (platform has no audio-only)');
-          return {
-            directUrl: info.url,
-            ext:       'm4a',   // we label it m4a so browser treats it as audio
-            title:     info.title || 'audio',
-          };
+          logger.info('Audio: using combined stream fallback');
+          return { directUrl: info.url, ext: 'm4a', title: info.title || 'audio' };
         }
       } catch {}
     }
   } catch (err) {
-    logger.warn(`Audio attempt 2 (combined) failed: ${err.message}`);
+    logger.warn(`Audio stage 2 failed: ${err.message}`);
   }
 
   throw new Error('AUDIO_EXTRACTION_FAILED');
