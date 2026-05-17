@@ -1,17 +1,36 @@
 const { createClient } = require('@supabase/supabase-js');
 const { logger } = require('../utils/logger');
 
+// Node.js 20 does not have native WebSocket support.
+// Supabase Realtime requires the 'ws' package as a polyfill.
+let ws;
+try {
+  ws = require('ws');
+} catch {
+  // ws not installed — Realtime features won't work but REST API will
+  ws = undefined;
+}
+
 let supabase = null;
 
 function getSupabase() {
   if (!supabase) {
+    const options = {
+      auth: { persistSession: false },
+      global: {
+        headers: { 'x-application-name': 'fetchclip-pro-backend' },
+      },
+    };
+
+    // Provide ws transport for Node.js 20
+    if (ws) {
+      options.realtime = { transport: ws };
+    }
+
     supabase = createClient(
       process.env.SUPABASE_URL,
       process.env.SUPABASE_SERVICE_KEY,
-      {
-        auth: { persistSession: false },
-        global: { headers: { 'x-application-name': 'fetchclip-pro-backend' } },
-      }
+      options
     );
   }
   return supabase;
@@ -80,7 +99,6 @@ async function getCachedMedia(url) {
       .eq('url_hash', hashUrl(url))
       .gt('expires_at', new Date().toISOString())
       .single();
-
     if (error || !data) return null;
     return data.metadata;
   } catch {
@@ -96,7 +114,6 @@ async function getTrendingDownloads(limit = 10) {
       .select('*')
       .order('download_count', { ascending: false })
       .limit(limit);
-
     if (error) throw error;
     return data || [];
   } catch (err) {
@@ -119,7 +136,6 @@ async function saveContactMessage({ name, email, message, ip }) {
 
 async function getAdminStats() {
   const db = getSupabase();
-
   const [totalResult, platformResult, failedResult, recentResult] = await Promise.allSettled([
     db.from('downloads').select('id', { count: 'exact', head: true }),
     db.from('downloads').select('platform').eq('success', true),
@@ -127,7 +143,7 @@ async function getAdminStats() {
     db.from('downloads').select('*').order('created_at', { ascending: false }).limit(20),
   ]);
 
-  const total = totalResult.status === 'fulfilled' ? totalResult.value.count : 0;
+  const total  = totalResult.status  === 'fulfilled' ? totalResult.value.count  : 0;
   const failed = failedResult.status === 'fulfilled' ? failedResult.value.count : 0;
 
   const platformCounts = {};
@@ -138,7 +154,6 @@ async function getAdminStats() {
   }
 
   const recent = recentResult.status === 'fulfilled' ? recentResult.value.data || [] : [];
-
   return { total, failed, platformCounts, recent };
 }
 
