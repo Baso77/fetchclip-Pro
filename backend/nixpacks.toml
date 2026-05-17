@@ -2,7 +2,7 @@
 nixPkgs = ["nodejs_20", "npm-9_x", "yt-dlp", "ffmpeg", "python311"]
 
 [phases.install]
-cmds = ["npm ci --production"]
+cmds = ["npm ci --omit=dev"]
 
 [phases.build]
 cmds = []
