@@ -22,8 +22,6 @@ const adminRouter    = require('./routes/admin');
 validateEnv();
 
 const app  = express();
-
-// Railway assigns a random PORT via env var — must use it exactly
 const PORT = process.env.PORT || 3001;
 
 const allowedOrigins = [
@@ -77,15 +75,29 @@ app.use((req, res) => {
   res.status(404).json({ success: false, error: 'Route not found' });
 });
 
-// Error handler
 app.use(errorHandler);
 
-// CRITICAL: listen on 0.0.0.0 so Railway can reach the container
+// Start server — must listen on 0.0.0.0 for Railway
 const server = app.listen(PORT, '0.0.0.0', () => {
   logger.info(`FetchClip Pro backend running on port ${PORT} [${process.env.NODE_ENV}]`);
+
+  // Self-update yt-dlp in background after startup (non-blocking)
+  try {
+    require('child_process').execFile(
+      process.env.YTDLP_PATH || 'yt-dlp',
+      ['--update'],
+      { timeout: 60000 },
+      (err, stdout) => {
+        if (err) logger.warn(`yt-dlp update skipped: ${err.message}`);
+        else logger.info(`yt-dlp: ${stdout.trim() || 'already up to date'}`);
+      }
+    );
+  } catch (e) {
+    logger.warn(`yt-dlp self-update failed: ${e.message}`);
+  }
 });
 
-server.timeout       = 120000;
+server.timeout = 120000;
 server.keepAliveTimeout = 65000;
 
 process.on('SIGTERM', () => {

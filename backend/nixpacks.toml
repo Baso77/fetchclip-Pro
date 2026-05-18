@@ -1,11 +1,8 @@
 [phases.setup]
-nixPkgs = ["nodejs_20", "ffmpeg", "python311"]
+nixPkgs = ["nodejs_20", "yt-dlp", "ffmpeg"]
 
 [phases.install]
-cmds = [
-  "npm ci --omit=dev",
-  "pip3 install -U yt-dlp"
-]
+cmds = ["npm ci --omit=dev"]
 
 [phases.build]
 cmds = []
