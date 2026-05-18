@@ -18,10 +18,9 @@ function getYtDlpPath() {
     return process.env.YTDLP_PATH;
   }
   const candidates = [
-    path.join(process.cwd(), 'bin', 'yt-dlp'),
     '/usr/local/bin/yt-dlp',
     '/usr/bin/yt-dlp',
-    '/usr/local/sbin/yt-dlp',
+    path.join(process.cwd(), 'bin', 'yt-dlp'),
     path.join(process.cwd(), 'node_modules', '.bin', 'yt-dlp'),
     'yt-dlp',
   ];
@@ -36,27 +35,38 @@ function getYtDlpPath() {
 
 const YTDLP_PATH = getYtDlpPath();
 
+// Build common yt-dlp args used in every call
+function buildBaseArgs() {
+  const args = [
+    '--no-playlist',
+    '--no-warnings',
+    '--no-check-certificate',
+    '--socket-timeout', '15',
+    '--retries', '3',
+    '--fragment-retries', '3',
+    // Modern browser user agent — helps bypass bot detection
+    '--user-agent',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    '--add-header', 'Accept-Language:en-US,en;q=0.9',
+    '--add-header', 'Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  ];
+
+  // Cookies support
+  if (process.env.COOKIES_FILE && fs.existsSync(process.env.COOKIES_FILE)) {
+    args.push('--cookies', process.env.COOKIES_FILE);
+    logger.info('Using cookies file');
+  }
+  if (process.env.COOKIES_FROM_BROWSER) {
+    args.push('--cookies-from-browser', process.env.COOKIES_FROM_BROWSER);
+  }
+
+  return args;
+}
+
 // =============================================================================
 // normalizeFormats
-// =============================================================================
-// ROOT CAUSE OF "Download Video button missing":
-//
-// Instagram returns formats where BOTH vcodec and acodec fields look like this:
-//   { vcodec: "avc1.640028", acodec: "mp4a.40.2" }  ← combined, has both
-//   { vcodec: "avc1.640028", acodec: "none" }         ← video-only DASH
-//   { vcodec: "none",        acodec: "mp4a.40.2" }    ← audio-only DASH
-//
-// The previous fix was TOO STRICT: it required acodec!=none for video bucket.
-// But some Instagram formats have acodec="none" even though yt-dlp's "best"
-// selector picks them because there is a matching audio stream that gets
-// auto-merged. When we filtered those out, videoFormats became empty → no
-// Download Video button.
-//
-// CORRECT FIX:
-// Show ALL formats that have a video codec in the UI dropdown.
-// But at DOWNLOAD TIME, force a combined-stream selector on the backend
-// regardless of which formatId the user picked.
-// This way the button always shows AND the download always has audio.
+// Key rule: show ALL formats that have a video stream in the dropdown.
+// Audio is guaranteed at download time by backend selector — not by filtering.
 // =============================================================================
 function normalizeFormats(rawFormats, platform) {
   if (!Array.isArray(rawFormats) || rawFormats.length === 0) return [];
@@ -64,10 +74,7 @@ function normalizeFormats(rawFormats, platform) {
   const seen = new Set();
   const normalized = [];
 
-  // ── ALL formats that have a video stream ──────────────────────────────────
-  // We include video-only (acodec=none) here intentionally so the dropdown
-  // is populated and the Download Video button appears.
-  // Audio is guaranteed at download time by the backend selector.
+  // All formats with a video stream
   const videoFormats = rawFormats.filter(f =>
     f.vcodec &&
     f.vcodec !== 'none' &&
@@ -75,7 +82,7 @@ function normalizeFormats(rawFormats, platform) {
     f.url.startsWith('http')
   );
 
-  // ── Audio-only streams ────────────────────────────────────────────────────
+  // Audio-only streams
   const audioOnlyFormats = rawFormats.filter(f =>
     (!f.vcodec || f.vcodec === 'none') &&
     f.acodec &&
@@ -84,14 +91,13 @@ function normalizeFormats(rawFormats, platform) {
     f.url.startsWith('http')
   );
 
-  // Sort video by height descending, add to normalized
+  // Sort by height descending
   const sortedVideo = videoFormats.sort((a, b) => (b.height || 0) - (a.height || 0));
 
   for (const f of sortedVideo) {
     const quality = f.height
       ? `${f.height}p`
       : (f.format_note || f.format_id || 'best');
-
     if (seen.has(quality)) continue;
     seen.add(quality);
 
@@ -110,49 +116,36 @@ function normalizeFormats(rawFormats, platform) {
     });
   }
 
-  // Add explicit audio-only entries (YouTube, Facebook, Vimeo)
+  // Audio-only entries
   const sortedAudio = audioOnlyFormats.sort(
     (a, b) => (b.abr || b.tbr || 0) - (a.abr || a.tbr || 0)
   );
-
   const audioAdded = new Set();
   for (const f of sortedAudio) {
     const abr = Math.round(f.abr || f.tbr || 0);
     const key = `audio-${abr}`;
     if (audioAdded.has(key)) continue;
     audioAdded.add(key);
-
     normalized.push({
       formatId: f.format_id,
       quality:  abr > 0 ? `Audio ${abr}kbps` : 'Audio Only',
-      height:   null,
-      width:    null,
-      ext:      f.ext || 'm4a',
+      height: null, width: null,
+      ext: f.ext || 'm4a',
       filesize: f.filesize || f.filesize_approx || null,
-      fps:      null,
-      vcodec:   null,
-      acodec:   f.acodec || null,
-      url:      f.url,
-      type:     'audio',
+      fps: null, vcodec: null, acodec: f.acodec || null,
+      url: f.url, type: 'audio',
     });
-
     if (audioAdded.size >= 3) break;
   }
 
-  // Synthetic audio entry for Instagram/TikTok/Twitter (no separate audio stream)
+  // Synthetic audio entry for Instagram/TikTok/Twitter
   if (audioAdded.size === 0 && videoFormats.length > 0) {
     normalized.push({
       formatId: '__bestaudio__',
-      quality:  'Audio Only',
-      height:   null,
-      width:    null,
-      ext:      'm4a',
-      filesize: null,
-      fps:      null,
-      vcodec:   null,
-      acodec:   'aac',
-      url:      '',
-      type:     'audio',
+      quality: 'Audio Only',
+      height: null, width: null, ext: 'm4a',
+      filesize: null, fps: null, vcodec: null, acodec: 'aac',
+      url: '', type: 'audio',
     });
   }
 
@@ -174,35 +167,20 @@ async function extractMetadata(url) {
 
   const args = [
     '--dump-json',
-    '--no-playlist',
-    '--no-warnings',
-    '--no-check-certificate',
-    '--socket-timeout', '10',
-    '--retries', '2',
-    '--fragment-retries', '2',
-    '--user-agent',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    '--add-header', 'Accept-Language:en-US,en;q=0.9',
+    ...buildBaseArgs(),
     url,
   ];
-
-  // Cookies support (needed for some platforms)
-  if (process.env.COOKIES_FILE && fs.existsSync(process.env.COOKIES_FILE)) {
-    args.push('--cookies', process.env.COOKIES_FILE);
-  }
-  if (process.env.COOKIES_FROM_BROWSER) {
-    args.push('--cookies-from-browser', process.env.COOKIES_FROM_BROWSER);
-  }
 
   let stdout;
   try {
     const result = await execFileAsync(YTDLP_PATH, args, {
-      timeout: 30000,
-      maxBuffer: 30 * 1024 * 1024,
+      timeout: 60000,
+      maxBuffer: 50 * 1024 * 1024,
     });
     stdout = result.stdout;
   } catch (err) {
-    logger.error(`yt-dlp failed: ${err.message}`);
+    logger.error(`yt-dlp metadata failed: ${err.message}`);
+    if (err.stderr) logger.error(`yt-dlp stderr: ${err.stderr}`);
     const msg = (err.stderr || err.message || '').toLowerCase();
     if (msg.includes('private video') || msg.includes('private')) throw new Error('PRIVATE_VIDEO');
     if (msg.includes('not available') || msg.includes('unavailable'))  throw new Error('UNAVAILABLE_VIDEO');
@@ -210,6 +188,7 @@ async function extractMetadata(url) {
     if (msg.includes('copyright'))                                      throw new Error('COPYRIGHT_RESTRICTED');
     if (msg.includes('age') && msg.includes('restricted'))             throw new Error('AGE_RESTRICTED');
     if (msg.includes('sign in') || msg.includes('login'))              throw new Error('LOGIN_REQUIRED');
+    if (msg.includes('unable to extract') || msg.includes('extraction'))  throw new Error('EXTRACTION_FAILED');
     throw new Error('EXTRACTION_FAILED');
   }
 
@@ -230,10 +209,23 @@ async function extractMetadata(url) {
 
   const formats = normalizeFormats(info.formats || [], platform);
 
+  // If no formats found at all, create one fallback entry
+  // so the Download Video button always appears
+  if (formats.filter(f => f.type === 'video').length === 0) {
+    logger.warn(`No video formats found for ${platform}, adding fallback`);
+    formats.unshift({
+      formatId: 'best',
+      quality:  'Best Available',
+      height: null, width: null, ext: 'mp4',
+      filesize: null, fps: null, vcodec: 'avc1', acodec: 'mp4a',
+      url: '', type: 'video',
+    });
+  }
+
   const result = {
-    id:          info.id       || null,
+    id:          info.id        || null,
     platform,
-    title:       info.title    || 'Untitled',
+    title:       info.title     || 'Untitled',
     description: (info.description || '').slice(0, 500),
     thumbnail:
       info.thumbnail ||
@@ -241,16 +233,16 @@ async function extractMetadata(url) {
         ? info.thumbnails[info.thumbnails.length - 1]?.url
         : null) ||
       null,
-    duration:    info.duration      || null,
+    duration:    info.duration       || null,
     uploader:    info.uploader || info.channel || info.creator || info.uploader_id || null,
-    uploaderUrl: info.uploader_url  || info.channel_url || null,
-    viewCount:   info.view_count    || null,
-    likeCount:   info.like_count    || null,
-    uploadDate:  info.upload_date   || null,
-    webpage_url: info.webpage_url   || url,
+    uploaderUrl: info.uploader_url   || info.channel_url || null,
+    viewCount:   info.view_count     || null,
+    likeCount:   info.like_count     || null,
+    uploadDate:  info.upload_date    || null,
+    webpage_url: info.webpage_url    || url,
     formats,
-    hasAudio: true,   // always true — audio is guaranteed at download time
-    hasVideo: formats.some(f => f.type === 'video'),
+    hasAudio: true,
+    hasVideo: true,
     extractedAt: Date.now(),
   };
 
@@ -260,15 +252,11 @@ async function extractMetadata(url) {
 }
 
 // =============================================================================
-// getDownloadUrl  (VIDEO)
+// getDownloadUrl — VIDEO (always with audio)
+// Ignores frontend formatId, always picks combined stream
 // =============================================================================
-// IMPORTANT: We IGNORE the formatId from the frontend and always use a
-// combined-stream selector. This guarantees the downloaded video has audio
-// regardless of which quality row the user selected.
-// =============================================================================
-async function getDownloadUrl(url, _ignoredFormatId) {
-  // Selector: prefer combined MP4 with both video+audio codecs
-  // Falls back through increasingly permissive options
+async function getDownloadUrl(url) {
+  // Priority: combined MP4 with both video+audio codecs
   const selector =
     'best[ext=mp4][vcodec!=none][acodec!=none][height<=1080]' +
     '/best[ext=mp4][vcodec!=none][acodec!=none]' +
@@ -279,37 +267,22 @@ async function getDownloadUrl(url, _ignoredFormatId) {
 
   const args = [
     '--dump-json',
-    '--no-playlist',
-    '--no-warnings',
-    '--no-check-certificate',
-    '--socket-timeout', '10',
-    '--retries', '1',
-    '--user-agent',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    ...buildBaseArgs(),
     '-f', selector,
     url,
   ];
 
-  if (process.env.COOKIES_FILE && fs.existsSync(process.env.COOKIES_FILE)) {
-    args.push('--cookies', process.env.COOKIES_FILE);
-  }
-  if (process.env.COOKIES_FROM_BROWSER) {
-    args.push('--cookies-from-browser', process.env.COOKIES_FROM_BROWSER);
-  }
-
   try {
     const { stdout } = await execFileAsync(YTDLP_PATH, args, {
-      timeout: 25000,
+      timeout: 45000,
       maxBuffer: 10 * 1024 * 1024,
     });
-
     const lines = stdout.trim().split('\n');
     let info = null;
     for (let i = lines.length - 1; i >= 0; i--) {
       try { info = JSON.parse(lines[i]); break; } catch {}
     }
     if (!info || !info.url) throw new Error('No URL in response');
-
     return { directUrl: info.url, ext: info.ext || 'mp4', title: info.title || 'video' };
   } catch (err) {
     logger.error(`getDownloadUrl failed: ${err.message}`);
@@ -318,40 +291,22 @@ async function getDownloadUrl(url, _ignoredFormatId) {
 }
 
 // =============================================================================
-// extractAudioUrl  (AUDIO ONLY)
-// =============================================================================
-// Two-stage fallback:
-//   Stage 1: bestaudio selector  → works for YouTube/Facebook/Vimeo
-//   Stage 2: best combined stream → works for Instagram/TikTok/Twitter
-//            (these platforms have no separate audio stream)
+// extractAudioUrl — AUDIO ONLY
+// Stage 1: bestaudio (YouTube/Facebook/Vimeo)
+// Stage 2: best combined stream (Instagram/TikTok/Twitter)
 // =============================================================================
 async function extractAudioUrl(url) {
-  const commonArgs = [
-    '--dump-json',
-    '--no-playlist',
-    '--no-warnings',
-    '--no-check-certificate',
-    '--socket-timeout', '10',
-    '--retries', '1',
-    '--user-agent',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  ];
-
-  const cookieArgs = [];
-  if (process.env.COOKIES_FILE && fs.existsSync(process.env.COOKIES_FILE)) {
-    cookieArgs.push('--cookies', process.env.COOKIES_FILE);
-  }
-  if (process.env.COOKIES_FROM_BROWSER) {
-    cookieArgs.push('--cookies-from-browser', process.env.COOKIES_FROM_BROWSER);
-  }
+  const baseArgs = buildBaseArgs();
 
   // Stage 1: explicit audio-only stream
   try {
-    const { stdout } = await execFileAsync(
-      YTDLP_PATH,
-      [...commonArgs, ...cookieArgs, '-f', 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio', url],
-      { timeout: 20000, maxBuffer: 10 * 1024 * 1024 }
-    );
+    const { stdout } = await execFileAsync(YTDLP_PATH, [
+      '--dump-json',
+      ...baseArgs,
+      '-f', 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio',
+      url,
+    ], { timeout: 30000, maxBuffer: 10 * 1024 * 1024 });
+
     const lines = stdout.trim().split('\n');
     for (let i = lines.length - 1; i >= 0; i--) {
       try {
@@ -366,18 +321,16 @@ async function extractAudioUrl(url) {
     logger.warn(`Audio stage 1 failed: ${err.message}`);
   }
 
-  // Stage 2: best combined stream (Instagram/TikTok/Twitter fallback)
+  // Stage 2: best combined stream with audio
   try {
-    const combinedSelector =
-      'best[ext=mp4][vcodec!=none][acodec!=none]' +
-      '/best[vcodec!=none][acodec!=none]' +
-      '/best';
+    const { stdout } = await execFileAsync(YTDLP_PATH, [
+      '--dump-json',
+      ...baseArgs,
+      '-f',
+      'best[ext=mp4][vcodec!=none][acodec!=none]/best[vcodec!=none][acodec!=none]/best',
+      url,
+    ], { timeout: 30000, maxBuffer: 10 * 1024 * 1024 });
 
-    const { stdout } = await execFileAsync(
-      YTDLP_PATH,
-      [...commonArgs, ...cookieArgs, '-f', combinedSelector, url],
-      { timeout: 20000, maxBuffer: 10 * 1024 * 1024 }
-    );
     const lines = stdout.trim().split('\n');
     for (let i = lines.length - 1; i >= 0; i--) {
       try {

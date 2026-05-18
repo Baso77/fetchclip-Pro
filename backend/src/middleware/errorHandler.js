@@ -1,29 +1,28 @@
 const { logger } = require('../utils/logger');
 
 const ERROR_MESSAGES = {
-  PRIVATE_VIDEO: 'This video is private and cannot be accessed.',
-  UNAVAILABLE_VIDEO: 'This video is unavailable or has been removed.',
-  DELETED_VIDEO: 'This video has been deleted.',
+  PRIVATE_VIDEO:        'This video is private and cannot be accessed.',
+  UNAVAILABLE_VIDEO:    'This video is unavailable or has been removed.',
+  DELETED_VIDEO:        'This video has been deleted.',
   COPYRIGHT_RESTRICTED: 'This content is restricted due to copyright.',
-  AGE_RESTRICTED: 'This content is age-restricted and cannot be downloaded.',
-  EXTRACTION_FAILED: 'Failed to extract media information. Please check the URL and try again.',
-  PARSE_FAILED: 'Failed to process media data. Please try again.',
-  DOWNLOAD_URL_FAILED: 'Failed to generate download link. Please try again.',
+  AGE_RESTRICTED:       'This content is age-restricted and cannot be downloaded.',
+  LOGIN_REQUIRED:       'This content requires login. Make sure the post is public.',
+  EXTRACTION_FAILED:    'Could not extract media from this URL. Make sure the post is public and the URL is correct.',
+  PARSE_FAILED:         'Failed to process media data. Please try again.',
+  DOWNLOAD_URL_FAILED:  'Failed to generate download link. Please try again.',
+  AUDIO_EXTRACTION_FAILED: 'Could not extract audio from this URL. Please try again.',
   UNSUPPORTED_PLATFORM: 'This platform is not supported yet.',
-  INVALID_URL: 'Please enter a valid media URL.',
-  RATE_LIMITED: 'Too many requests. Please wait a moment and try again.',
+  INVALID_URL:          'Please enter a valid media URL.',
+  RATE_LIMITED:         'Too many requests. Please wait a moment and try again.',
+  YOUTUBE_COMING_SOON:  'YouTube support is coming soon! Try TikTok, Instagram, Facebook, Twitter/X or Pinterest.',
 };
 
 function errorHandler(err, req, res, next) {
-  const code = err.message;
+  const code    = err.message;
   const friendly = ERROR_MESSAGES[code];
 
   if (friendly) {
-    return res.status(422).json({
-      success: false,
-      error: friendly,
-      code,
-    });
+    return res.status(422).json({ success: false, error: friendly, code });
   }
 
   if (err.name === 'ZodError') {
@@ -35,14 +34,10 @@ function errorHandler(err, req, res, next) {
   }
 
   if (err.message === 'Not allowed by CORS') {
-    return res.status(403).json({
-      success: false,
-      error: 'Access denied',
-      code: 'CORS_ERROR',
-    });
+    return res.status(403).json({ success: false, error: 'Access denied', code: 'CORS_ERROR' });
   }
 
-  logger.error(`Unhandled error [${req.method} ${req.path}]:`, err);
+  logger.error(`Unhandled error [${req.method} ${req.path}]: ${err.message}`);
 
   res.status(500).json({
     success: false,
